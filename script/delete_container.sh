@@ -5,7 +5,7 @@
 # MySQL Connection
 # MySQL 연결 정보
 DB_ADDRESS=192.168.2.11
-DB_PORT=3306
+DB_PORT=3307
 DB_NAME="nfs_db"
 DB_USER="nfs_user"
 DB_PASSWORD="nfs_password"
