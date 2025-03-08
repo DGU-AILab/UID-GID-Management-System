@@ -1,23 +1,56 @@
 #!/bin/bash
 
-# 설정
-BACKUP_DIR="/home/tako1/share/mysql_backups"
-CONTAINER_NAME="nfs_mysql"
-DATE=$(date +%Y%m%d_%H%M%S)
-BACKUP_FILE="mysql_backup_$DATE.sql"
+# ==============================
 
-# 백업 디렉토리 생성
-mkdir -p $BACKUP_DIR
+# MySQL Connection
+# MySQL 연결 정보
+DB_ADDRESS=192.168.2.11
+DB_PORT=3307
+DB_NAME="nfs_db"
+DB_USER="nfs_user"
+DB_PASSWORD="nfs_password"
 
-# MySQL 컨테이너에서 백업 실행
-echo "MySQL 데이터베이스 백업 시작..."
-docker exec $CONTAINER_NAME sh -c 'exec mysqldump --all-databases -uroot -p"$MYSQL_ROOT_PASSWORD"' >"$BACKUP_DIR/$BACKUP_FILE"
+# ==============================
 
-# 압축
-echo "백업 파일 압축 중..."
-gzip "$BACKUP_DIR/$BACKUP_FILE"
+# Create a ~/.my.cnf file
+# ~/.my.cnf 파일 생성
+echo "[client]
+user=nfs_user
+password=nfs_password
+host=$DB_ADDRESS
+port=$DB_PORT" >~/.my.cnf
 
-echo "백업 완료: $BACKUP_DIR/${BACKUP_FILE}.gz"
+chmod 600 ~/.my.cnf
 
-# 오래된 백업 정리 (30일 이상된 백업 삭제)
-find $BACKUP_DIR -name "mysql_backup_*.sql.gz" -mtime +30 -delete
+# 데이터베이스 백업
+echo "Creating database backup..."
+
+# 호스트명에서 서버 번호 추출
+hostname=$(hostname)
+server_number=$(echo "$hostname" | grep -o '[0-9]\+')
+
+# 백업 파일 경로
+backup_dir="/home/tako${server_number}/share/mysql_backups"
+if [ ! -d "$backup_dir" ]; then
+    sudo mkdir -p "$backup_dir"
+    sudo chmod 775 "$backup_dir"
+fi
+
+# 임시 파일 생성 (svmanager 권한으로 접근 가능한 위치)
+temp_file="/tmp/nfs_db_backup_$(date +"%Y%m%d_%H%M%S").sql"
+
+# 백업 파일 이름 만들기
+timestamp=$(date +"%Y%m%d_%H%M%S")
+backup_file="${backup_dir}/nfs_db_backup_${timestamp}.sql.gz"
+
+# 먼저 SQL 덤프를 생성하고 임시 파일에 저장
+if mysqldump --defaults-file=~/.my.cnf --no-tablespaces "$DB_NAME" >"$temp_file"; then
+    # gzip으로 압축하고 대상 위치로 이동
+    gzip -c "$temp_file" | sudo tee "$backup_file" >/dev/null
+    sudo chown svmanager:svmanager "$backup_file"
+    rm -f "$temp_file" # 임시 파일 삭제
+    echo "Database backup created successfully: $backup_file"
+else
+    rm -f "$temp_file" # 임시 파일 삭제
+    echo "Error: Database backup failed"
+fi
