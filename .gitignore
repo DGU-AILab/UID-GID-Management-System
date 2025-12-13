@@ -1,0 +1,29 @@
+# Google Cloud credentials
+*.json
+user-management-*.json
+
+# Excel exports
+excel_exports/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

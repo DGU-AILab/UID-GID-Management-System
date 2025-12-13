@@ -210,3 +210,12 @@ else
   rm -f "$temp_file" # 임시 파일 삭제
   echo "Error: Database backup failed"
 fi
+
+# Google Sheets 및 Excel 업데이트
+echo "Updating Google Sheets and Excel export..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${SCRIPT_DIR}/export_users_to_excel.py" ]; then
+  python3 "${SCRIPT_DIR}/export_users_to_excel.py"
+else
+  echo "Warning: export_users_to_excel.py not found"
+fi
