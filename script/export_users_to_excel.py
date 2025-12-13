@@ -24,7 +24,7 @@ SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
 # 데이터베이스 연결 정보
 DB_CONFIG = {
-    'host': '192.168.2.11',
+    'host': '192.168.1.11',
     'port': 3307,
     'user': 'nfs_user',
     'password': 'nfs_password',
@@ -141,9 +141,49 @@ def get_google_sheets_service(credentials_path):
         print(f"Google Sheets 인증 오류: {e}")
         return None
 
-def update_google_sheet(service, columns, data):
+def ensure_sheet_exists(service, sheet_name):
+    """시트가 존재하는지 확인하고, 없으면 생성"""
+    try:
+        spreadsheet = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+        sheets = spreadsheet.get('sheets', [])
+
+        # 시트가 이미 존재하는지 확인
+        for sheet in sheets:
+            if sheet['properties']['title'] == sheet_name:
+                print(f"✓ '{sheet_name}' 시트가 이미 존재합니다.")
+                return sheet['properties']['sheetId']
+
+        # 시트가 없으면 새로 생성
+        print(f"'{sheet_name}' 시트를 생성합니다...")
+        requests = [{
+            'addSheet': {
+                'properties': {
+                    'title': sheet_name
+                }
+            }
+        }]
+
+        response = service.spreadsheets().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={'requests': requests}
+        ).execute()
+
+        sheet_id = response['replies'][0]['addSheet']['properties']['sheetId']
+        print(f"✓ '{sheet_name}' 시트가 생성되었습니다.")
+        return sheet_id
+
+    except HttpError as e:
+        print(f"시트 확인/생성 오류: {e}")
+        return None
+
+def update_google_sheet(service, columns, data, sheet_name='LAB'):
     """Google Sheets에 데이터 업데이트"""
     try:
+        # 시트가 존재하는지 확인하고, 없으면 생성
+        sheet_id = ensure_sheet_exists(service, sheet_name)
+        if sheet_id is None:
+            return False
+
         # 데이터 준비 (헤더 + 데이터 행)
         values = [list(columns)]  # 헤더 행
         for row in data:
@@ -151,13 +191,13 @@ def update_google_sheet(service, columns, data):
             cleaned_row = ['' if v is None else str(v) for v in row]
             values.append(cleaned_row)
 
-        # 시트 범위 계산 (A1부터 시작)
-        sheet_range = 'A1'
+        # 시트 범위 계산 (LAB 시트의 A1부터 시작)
+        sheet_range = f'{sheet_name}!A1'
 
         # 기존 데이터 삭제
         service.spreadsheets().values().clear(
             spreadsheetId=SPREADSHEET_ID,
-            range='A:Z'
+            range=f'{sheet_name}!A:Z'
         ).execute()
 
         # 새 데이터 업데이트
@@ -173,10 +213,10 @@ def update_google_sheet(service, columns, data):
         ).execute()
 
         # 헤더 서식 적용 (배경색, 볼드)
-        format_header(service, len(columns))
+        format_header(service, len(columns), sheet_id)
 
         updated_cells = result.get('updatedCells', 0)
-        print(f"✓ Google Sheets 업데이트 완료: {updated_cells}개의 셀이 업데이트되었습니다.")
+        print(f"✓ Google Sheets '{sheet_name}' 시트 업데이트 완료: {updated_cells}개의 셀이 업데이트되었습니다.")
         return True
 
     except HttpError as e:
@@ -186,13 +226,9 @@ def update_google_sheet(service, columns, data):
         print(f"Google Sheets 업데이트 오류: {e}")
         return False
 
-def format_header(service, num_columns):
+def format_header(service, num_columns, sheet_id):
     """Google Sheets 헤더에 서식 적용 (배경색, 볼드)"""
     try:
-        # 시트 ID 가져오기
-        spreadsheet = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
-        sheet_id = spreadsheet['sheets'][0]['properties']['sheetId']
-
         requests = [
             {
                 'repeatCell': {
