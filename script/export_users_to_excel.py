@@ -18,19 +18,35 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+# 데이터베이스 연결 정보
+def load_db_config():
+    """db_config.env 파일에서 데이터베이스 설정을 읽어옵니다."""
+    config = {}
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_file = os.path.join(script_dir, 'db_config.env')
+
+    with open(config_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                if '=' in line:
+                    key, value = line.split('=', 1)
+                    config[key.strip()] = value.strip()
+
+    return {
+        'host': config['DB_HOST'],
+        'port': int(config['DB_PORT']),
+        'user': config['DB_USER'],
+        'password': config['DB_PASSWORD'],
+        'database': config['DB_NAME'],
+        'charset': config['DB_CHARSET']
+    }
+
+DB_CONFIG = load_db_config()
+
 # Google Sheets 설정
 SPREADSHEET_ID = '1U3-YidZrxNHH4mEbq6-MaxZqsUWJ6HZn2GV9flwIwPY'
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-
-# 데이터베이스 연결 정보
-DB_CONFIG = {
-    'host': '192.168.1.11',
-    'port': 3307,
-    'user': 'nfs_user',
-    'password': 'nfs_password',
-    'database': 'nfs_db',
-    'charset': 'utf8mb4'
-}
 
 def get_user_data():
     """데이터베이스에서 사용자 정보를 조회"""

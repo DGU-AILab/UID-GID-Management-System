@@ -15,14 +15,32 @@ import sys
 import argparse
 
 # 데이터베이스 연결 정보
-DB_CONFIG = {
-    'host': '192.168.2.11',
-    'port': 3307,
-    'user': 'nfs_user',
-    'password': 'nfs_password',
-    'database': 'nfs_db',
-    'charset': 'utf8mb4'
-}
+import os
+
+def load_db_config():
+    """db_config.env 파일에서 데이터베이스 설정을 읽어옵니다."""
+    config = {}
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_file = os.path.join(script_dir, 'db_config.env')
+
+    with open(config_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                if '=' in line:
+                    key, value = line.split('=', 1)
+                    config[key.strip()] = value.strip()
+
+    return {
+        'host': config['DB_HOST'],
+        'port': int(config['DB_PORT']),
+        'user': config['DB_USER'],
+        'password': config['DB_PASSWORD'],
+        'database': config['DB_NAME'],
+        'charset': config['DB_CHARSET']
+    }
+
+DB_CONFIG = load_db_config()
 
 def get_users_info(cursor, usernames):
     """삭제할 사용자 정보 조회"""

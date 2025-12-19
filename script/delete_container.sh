@@ -4,11 +4,19 @@
 
 # MySQL Connection
 # MySQL 연결 정보
-DB_ADDRESS=192.168.2.11
-DB_PORT=3307
-DB_NAME="nfs_db"
-DB_USER="nfs_user"
-DB_PASSWORD="nfs_password"
+# Load database configuration from db_config.env
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${SCRIPT_DIR}/db_config.env" ]; then
+  source "${SCRIPT_DIR}/db_config.env"
+  DB_ADDRESS=$DB_HOST
+  DB_PORT=$DB_PORT
+  DB_NAME=$DB_NAME
+  DB_USER=$DB_USER
+  DB_PASSWORD=$DB_PASSWORD
+else
+  echo "Error: db_config.env not found"
+  exit 1
+fi
 
 # ==============================
 
