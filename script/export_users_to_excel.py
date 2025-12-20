@@ -39,23 +39,32 @@ def load_db_config():
         'user': config['DB_USER'],
         'password': config['DB_PASSWORD'],
         'database': config['DB_NAME'],
-        'charset': config['DB_CHARSET']
+        'charset': config['DB_CHARSET'],
+        'server_domain': config.get('SERVER_DOMAIN', 'LAB')  # 기본값 LAB
     }
 
 DB_CONFIG = load_db_config()
+SERVER_DOMAIN = DB_CONFIG.pop('server_domain')  # DB_CONFIG에서 분리
 
 # Google Sheets 설정
 SPREADSHEET_ID = '1U3-YidZrxNHH4mEbq6-MaxZqsUWJ6HZn2GV9flwIwPY'
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
-def get_user_data():
-    """데이터베이스에서 사용자 정보를 조회"""
+def get_user_data(existing_only=True):
+    """데이터베이스에서 사용자 정보를 조회
+
+    Args:
+        existing_only: True이면 existing=1인 데이터만, False이면 existing=0인 데이터만 조회
+    """
     try:
         connection = pymysql.connect(**DB_CONFIG)
         cursor = connection.cursor()
 
+        # existing 조건 추가
+        existing_condition = "dc.existing = TRUE" if existing_only else "dc.existing = FALSE"
+
         # 사용자 정보 조회 쿼리
-        query = """
+        query = f"""
         SELECT
             '' AS '존재여부',
             u.name AS '이름',
@@ -79,6 +88,7 @@ def get_user_data():
         LEFT JOIN `group` g ON u.ubuntu_gid = g.ubuntu_gid
         LEFT JOIN docker_container dc ON u.id = dc.user_id
         LEFT JOIN used_ports up ON dc.id = up.docker_container_record_id
+        WHERE {existing_condition}
         GROUP BY u.id, dc.id
         ORDER BY dc.server_id ASC, u.name ASC;
         """
@@ -96,11 +106,14 @@ def get_user_data():
         print(f"데이터베이스 오류: {e}")
         sys.exit(1)
 
-def create_excel(columns, data, filename):
-    """엑셀 파일 생성"""
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "사용자 정보"
+def create_excel_sheet(wb, sheet_name, columns, data):
+    """워크북에 시트를 생성하고 데이터를 작성"""
+    # 첫 번째 시트인 경우 active 시트 사용, 아니면 새 시트 생성
+    if len(wb.sheetnames) == 1 and wb.active.title == 'Sheet':
+        ws = wb.active
+        ws.title = sheet_name
+    else:
+        ws = wb.create_sheet(title=sheet_name)
 
     # 헤더 스타일 설정
     header_font = Font(bold=True, color="FFFFFF")
@@ -137,11 +150,25 @@ def create_excel(columns, data, filename):
         adjusted_width = min(max_length + 2, 50)  # 최대 50으로 제한
         ws.column_dimensions[column_letter].width = adjusted_width
 
+    return ws
+
+def create_excel(active_columns, active_data, deleted_columns, deleted_data, filename, domain):
+    """엑셀 파일 생성 (활성 시트와 삭제된 시트 포함)"""
+    wb = Workbook()
+
+    # 활성 사용자 시트
+    create_excel_sheet(wb, domain, active_columns, active_data)
+    print(f"✓ '{domain}' 시트 생성 완료: {len(active_data)}개의 레코드")
+
+    # 삭제된 사용자 시트
+    if deleted_data:
+        create_excel_sheet(wb, f"{domain}(deleted)", deleted_columns, deleted_data)
+        print(f"✓ '{domain}(deleted)' 시트 생성 완료: {len(deleted_data)}개의 레코드")
+
     # 파일 저장
     try:
         wb.save(filename)
         print(f"✓ 엑셀 파일이 성공적으로 생성되었습니다: {filename}")
-        print(f"✓ 총 {len(data)}개의 레코드가 저장되었습니다.")
     except Exception as e:
         print(f"파일 저장 오류: {e}")
         sys.exit(1)
@@ -308,15 +335,22 @@ def main():
     filename = os.path.join(export_dir, f"user_export_{today}.xlsx")
 
     print(f"\n저장 디렉토리: {export_dir}")
+    print(f"서버 도메인: {SERVER_DOMAIN}")
     print(f"데이터베이스 연결 중... ({DB_CONFIG['host']}:{DB_CONFIG['port']})")
 
-    # 데이터 조회
-    columns, data = get_user_data()
-    print(f"✓ 데이터 조회 완료: {len(data)}개의 레코드")
+    # 활성 사용자 데이터 조회 (existing=1)
+    print(f"\n활성 사용자 데이터 조회 중...")
+    active_columns, active_data = get_user_data(existing_only=True)
+    print(f"✓ 활성 사용자 데이터 조회 완료: {len(active_data)}개의 레코드")
+
+    # 삭제된 사용자 데이터 조회 (existing=0)
+    print(f"\n삭제된 사용자 데이터 조회 중...")
+    deleted_columns, deleted_data = get_user_data(existing_only=False)
+    print(f"✓ 삭제된 사용자 데이터 조회 완료: {len(deleted_data)}개의 레코드")
 
     # 엑셀 파일 생성
     print(f"\n엑셀 파일 생성 중: {os.path.basename(filename)}")
-    create_excel(columns, data, filename)
+    create_excel(active_columns, active_data, deleted_columns, deleted_data, filename, SERVER_DOMAIN)
 
     # Google Sheets 업데이트
     print(f"\nGoogle Sheets 업데이트 중...")
@@ -325,7 +359,11 @@ def main():
     if os.path.exists(credentials_path):
         service = get_google_sheets_service(credentials_path)
         if service:
-            update_google_sheet(service, columns, data)
+            # 활성 사용자 시트 업데이트
+            update_google_sheet(service, active_columns, active_data, sheet_name=SERVER_DOMAIN)
+            # 삭제된 사용자 시트 업데이트
+            if deleted_data:
+                update_google_sheet(service, deleted_columns, deleted_data, sheet_name=f"{SERVER_DOMAIN}(deleted)")
         else:
             print("⚠ Google Sheets 서비스 연결 실패")
     else:
