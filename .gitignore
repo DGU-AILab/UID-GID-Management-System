@@ -3,6 +3,7 @@
 user-management-*.json
 
 # Local DB configuration overrides
+script/db_config.env
 script/db_config.local.env
 
 # Excel exports
