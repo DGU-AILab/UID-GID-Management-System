@@ -57,20 +57,79 @@ if [ "$phone_exists" -eq 0 ]; then
   fi
 fi
 
-if [ ${#alter_clauses[@]} -eq 0 ]; then
+if [ ${#alter_clauses[@]} -gt 0 ]; then
+  alter_sql=$(
+    IFS=", "
+    echo "${alter_clauses[*]}"
+  )
+
+  echo "Applying schema changes to ${DB_NAME}.user..."
+  mysql --defaults-extra-file="$MY_CNF_FILE" -D "$DB_NAME" -e "
+    ALTER TABLE user
+    ${alter_sql};
+  "
+else
   echo "No schema changes needed. user table already has email and phone columns."
-  exit 0
 fi
 
-alter_sql=$(
-  IFS=", "
-  echo "${alter_clauses[*]}"
-)
-
-echo "Applying schema changes to ${DB_NAME}.user..."
+echo "Refreshing user_container_info view..."
 mysql --defaults-extra-file="$MY_CNF_FILE" -D "$DB_NAME" -e "
-  ALTER TABLE user
-  ${alter_sql};
+  CREATE OR REPLACE VIEW user_container_info AS
+  SELECT
+      u.name AS '사용자 이름',
+      u.ubuntu_username AS '우분투 아이디',
+      u.email AS '이메일',
+      u.phone AS '전화번호',
+      g.ubuntu_groupname AS '우분투 그룹 이름',
+      dc.server_id AS '배정된 서버',
+      (
+          SELECT
+              up.port_number
+          FROM
+              used_ports up
+          WHERE
+              up.docker_container_record_id = dc.id
+              AND up.purpose_of_use = 'ssh'
+      ) AS 'ssh 포트',
+      (
+          SELECT
+              up.port_number
+          FROM
+              used_ports up
+          WHERE
+              up.docker_container_record_id = dc.id
+              AND up.purpose_of_use = 'jupyter notebook'
+      ) AS 'jupyter 포트',
+      (
+          SELECT
+              GROUP_CONCAT(
+                  up.port_number
+                  ORDER BY
+                      up.port_number SEPARATOR ', '
+              )
+          FROM
+              used_ports up
+          WHERE
+              up.docker_container_record_id = dc.id
+              AND up.purpose_of_use != 'ssh'
+              AND up.purpose_of_use != 'jupyter notebook'
+      ) AS '기타 할당 포트',
+      dc.expiring_at AS '사용 만료일',
+      dc.created_by AS '컨테이너 생성한 관리자',
+      dc.created_at AS '컨테이너 생성 일자',
+      dc.image AS '컨테이너 이미지',
+      dc.image_version AS '컨테이너 버전',
+      dc.container_name AS '컨테이너 이름',
+      u.note AS '노트'
+  FROM
+      user u
+      LEFT JOIN \`group\` g ON u.ubuntu_gid = g.ubuntu_gid
+      JOIN docker_container dc ON u.id = dc.user_id
+  WHERE
+      dc.existing = TRUE
+  ORDER BY
+      dc.server_id ASC,
+      u.name ASC;
 "
 
 echo "Migration completed successfully."

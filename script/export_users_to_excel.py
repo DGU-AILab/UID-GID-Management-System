@@ -98,8 +98,8 @@ def get_user_data(existing_only=True):
             DATE_FORMAT(dc.created_at, '%%Y-%%m-%%d') AS '컨테이너 생성일자',
             CONCAT(dc.image, ':', dc.image_version) AS 'docker image version',
             dc.container_name AS '컨테이너 명',
-            '' AS 'E-mail',
-            '' AS '전화번호',
+            COALESCE(u.email, '') AS 'E-mail',
+            COALESCE(u.phone, '') AS '전화번호',
             '' AS '사용여부',
             u.note AS '비고'
         FROM user u

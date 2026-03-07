@@ -41,6 +41,8 @@ container_version=""
 container_name=""
 container_ports=""
 created_by=""
+email=""
+phone=""
 note=""
 
 # Display help function
@@ -63,6 +65,8 @@ function show_help {
   echo "                                  (comma-separated, e.g., 5678,8888) except ssh and jupyter ports"
   echo "      --no-additional-ports        Skip additional port mappings"
   echo "  -c, --created-by CREATOR        Username of server manager"
+  echo "      --email EMAIL               User email (required)"
+  echo "      --phone PHONE               User phone (required)"
   echo "  -m, --note NOTE                 Additional notes"
   exit 0
 }
@@ -129,6 +133,14 @@ while [[ $# -gt 0 ]]; do
     created_by="$2"
     shift 2
     ;;
+  --email)
+    email="$2"
+    shift 2
+    ;;
+  --phone)
+    phone="$2"
+    shift 2
+    ;;
   -m | --note)
     note="$2"
     shift 2
@@ -182,6 +194,20 @@ if [ -z "$created_by" ]; then
   read -p "Created by (Username of server manager): " created_by
 fi
 
+while [ -z "$email" ]; do
+  read -p "Email (required): " email
+  if [ -z "$email" ]; then
+    echo "Email is required."
+  fi
+done
+
+while [ -z "$phone" ]; do
+  read -p "Phone (required): " phone
+  if [ -z "$phone" ]; then
+    echo "Phone is required."
+  fi
+done
+
 if [ -z "$note" ]; then
   read -p "Note: " note
 fi
@@ -201,6 +227,8 @@ echo "  Container Version: $container_version"
 echo "  Container Name: $container_name"
 echo "  Container Ports: $container_ports"
 echo "  Created By: $created_by"
+echo "  Email: $email"
+echo "  Phone: $phone"
 echo "  Note: $note"
 echo ""
 echo ""
@@ -507,7 +535,10 @@ fi
 if [ -n "$user_info" ]; then
   user_result=$(mysql -D "$DB_NAME" -N -s -e "
     UPDATE user
-    SET ubuntu_gid = $available_gid,
+    SET name = '$name',
+    ubuntu_gid = $available_gid,
+    email = '$email',
+    phone = '$phone',
     note = '$note'
     WHERE ubuntu_uid = $available_uid;
     SELECT ROW_COUNT();" 2>&1)
@@ -517,8 +548,8 @@ if [ -n "$user_info" ]; then
   fi
 else
   user_result=$(mysql -D "$DB_NAME" -N -s -e "
-    INSERT INTO user (name, ubuntu_username, ubuntu_uid, ubuntu_gid, note)
-    VALUES ('$name', '$username', $available_uid, $available_gid, '$note');
+    INSERT INTO user (name, ubuntu_username, ubuntu_uid, ubuntu_gid, email, phone, note)
+    VALUES ('$name', '$username', $available_uid, $available_gid, '$email', '$phone', '$note');
     SELECT ROW_COUNT();")
 
   if [ -z "$user_result" ] || [ "$user_result" -ne 1 ]; then

@@ -76,6 +76,8 @@ CREATE VIEW
 SELECT
     u.name AS '사용자 이름',
     u.ubuntu_username AS '우분투 아이디',
+    u.email AS '이메일',
+    u.phone AS '전화번호',
     g.ubuntu_groupname AS '우분투 그룹 이름',
     dc.server_id AS '배정된 서버',
     (
