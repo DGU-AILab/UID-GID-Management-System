@@ -3,11 +3,11 @@
 사용자를 데이터베이스에서 삭제하는 스크립트
 
 사용법:
-    python delete_user.py <username1> [username2] [username3] ...
+    python maintenance/delete_user.py <username1> [username2] [username3] ...
 
 예시:
-    python delete_user.py test250420
-    python delete_user.py user1 user2 user3
+    python maintenance/delete_user.py test250420
+    python maintenance/delete_user.py user1 user2 user3
 """
 
 import pymysql
@@ -20,15 +20,16 @@ import os
 def resolve_db_config_path():
     """우선순위에 따라 DB 설정 파일 경로를 반환합니다."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = [os.path.join(script_dir, 'db_config.local.env')]
+    project_root = os.path.dirname(script_dir)
+    candidates = [os.path.join(project_root, 'config', 'db_config.local.env')]
 
     for path in candidates:
         if os.path.exists(path):
             return path
 
     raise FileNotFoundError(
-        "db_config.local.env not found. "
-        "Copy db_config.example.env to db_config.local.env first."
+        "config/db_config.local.env not found. "
+        "Copy config/db_config.example.env to config/db_config.local.env first."
     )
 
 def load_db_config():
@@ -180,7 +181,7 @@ def delete_users(usernames, delete_group=True, delete_used_ids=True):
 def main():
     parser = argparse.ArgumentParser(
         description='사용자를 데이터베이스에서 삭제합니다.',
-        epilog='예시: python delete_user.py test250420 user1 user2'
+        epilog='예시: python maintenance/delete_user.py test250420 user1 user2'
     )
     parser.add_argument(
         'usernames',

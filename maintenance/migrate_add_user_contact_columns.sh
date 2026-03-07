@@ -3,12 +3,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+CONFIG_DIR="${PROJECT_ROOT}/config"
 
-if [ -f "${SCRIPT_DIR}/db_config.local.env" ]; then
-  DB_CONFIG_FILE="${SCRIPT_DIR}/db_config.local.env"
+if [ -f "${CONFIG_DIR}/db_config.local.env" ]; then
+  DB_CONFIG_FILE="${CONFIG_DIR}/db_config.local.env"
 else
   echo "Error: db_config.local.env not found"
-  echo "Hint: copy script/db_config.example.env to script/db_config.local.env"
+  echo "Hint: copy config/db_config.example.env to config/db_config.local.env"
   exit 1
 fi
 

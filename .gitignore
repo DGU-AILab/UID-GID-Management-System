@@ -1,10 +1,7 @@
-# Google Cloud credentials
-*.json
-user-management-*.json
-
-# Local DB configuration overrides
-script/db_config.env
-script/db_config.local.env
+# Local credentials and configuration
+config/db_config.env
+config/*.local.env
+config/*.json
 
 # Excel exports
 excel_exports/

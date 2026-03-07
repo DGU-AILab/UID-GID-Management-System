@@ -25,14 +25,15 @@ import pymysql
 def resolve_db_config_path():
     """우선순위에 따라 DB 설정 파일 경로를 반환합니다."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    path = os.path.join(script_dir, "db_config.local.env")
+    project_root = os.path.dirname(script_dir)
+    path = os.path.join(project_root, "config", "db_config.local.env")
 
     if os.path.exists(path):
         return path
 
     raise FileNotFoundError(
-        "db_config.local.env not found. "
-        "Copy db_config.example.env to db_config.local.env first."
+        "config/db_config.local.env not found. "
+        "Copy config/db_config.example.env to config/db_config.local.env first."
     )
 
 

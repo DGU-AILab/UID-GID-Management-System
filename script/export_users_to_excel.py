@@ -1,88 +1,99 @@
 #!/usr/bin/env python3
-"""
-사용자 정보를 MySQL 데이터베이스에서 추출하여 Excel 파일로 저장하는 스크립트
+"""Export active/deleted user data from LAB/FARM databases to Excel and Google Sheets."""
 
-출력 디렉토리: ../excel_exports/
-출력 파일: user_export_YYYY-MM-DD.xlsx
-"""
+import argparse
+import os
+import sys
+from datetime import datetime
 
 import pymysql
 from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, PatternFill
-from datetime import datetime
-import sys
-import os
+from openpyxl.styles import Alignment, Font, PatternFill
 
-# Google Sheets API
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-def resolve_db_config_path():
-    """우선순위에 따라 DB 설정 파일 경로를 반환합니다."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = [os.path.join(script_dir, 'db_config.local.env')]
-
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-
-    raise FileNotFoundError(
-        "db_config.local.env not found. "
-        "Copy db_config.example.env to db_config.local.env first."
-    )
-
-# 데이터베이스 연결 정보
-def load_db_config():
-    """DB 설정 파일에서 데이터베이스 설정을 읽어옵니다."""
-    config = {}
-    config_file = resolve_db_config_path()
-
-    with open(config_file, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#'):
-                if '=' in line:
-                    key, value = line.split('=', 1)
-                    config[key.strip()] = value.strip()
-
-    return {
-        'host': config['DB_HOST'],
-        'port': int(config['DB_PORT']),
-        'user': config['DB_USER'],
-        'password': config['DB_PASSWORD'],
-        'database': config['DB_NAME'],
-        'charset': config['DB_CHARSET'],
-        'server_domain': config.get('SERVER_DOMAIN', 'LAB')  # 기본값 LAB
-    }
-
-DB_CONFIG = load_db_config()
-SERVER_DOMAIN = DB_CONFIG.pop('server_domain')  # DB_CONFIG에서 분리
-
-# Google Sheets 설정
 SPREADSHEET_ID = '1U3-YidZrxNHH4mEbq6-MaxZqsUWJ6HZn2GV9flwIwPY'
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+VALID_DOMAINS = ('LAB', 'FARM')
 
-def get_user_data(existing_only=True):
-    """데이터베이스에서 사용자 정보를 조회
 
-    Args:
-        existing_only: True이면 existing=1인 데이터만, False이면 existing=0인 데이터만 조회
-    """
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='사용자 정보를 MySQL 데이터베이스에서 추출하여 Excel/Google Sheets로 저장합니다.'
+    )
+    parser.add_argument(
+        '--domains',
+        help='조회할 도메인 목록 (예: LAB,FARM). 기본값은 설정 파일의 EXPORT_DOMAINS 또는 SERVER_DOMAIN.',
+    )
+    return parser.parse_args()
+
+
+def resolve_db_config_path():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
+    config_path = os.path.join(project_root, 'config', 'db_config.local.env')
+    if os.path.exists(config_path):
+        return config_path
+
+    raise FileNotFoundError(
+        'config/db_config.local.env not found. Copy config/db_config.example.env to config/db_config.local.env first.'
+    )
+
+
+def load_raw_config():
+    config = {}
+    with open(resolve_db_config_path(), 'r', encoding='utf-8') as handle:
+        for line in handle:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                config[key.strip()] = value.strip()
+    return config
+
+
+def normalize_domain(domain_name):
+    normalized = domain_name.strip().upper()
+    if normalized not in VALID_DOMAINS:
+        raise ValueError(f'Unsupported domain: {domain_name}')
+    return normalized
+
+
+def resolve_domains(raw_config, raw_domains):
+    domains_value = raw_domains or raw_config.get('EXPORT_DOMAINS') or raw_config.get('SERVER_DOMAIN') or 'LAB'
+    domains = [normalize_domain(item) for item in domains_value.split(',') if item.strip()]
+    if not domains:
+        raise ValueError('At least one domain is required.')
+    return list(dict.fromkeys(domains))
+
+
+def resolve_db_host_for_domain(raw_config, domain_name):
+    specific_key = f'{domain_name}_DB_HOST'
+    if raw_config.get(specific_key):
+        return raw_config[specific_key]
+    if raw_config.get('DB_HOST'):
+        return raw_config['DB_HOST']
+    raise ValueError(f'{specific_key} or DB_HOST must be configured.')
+
+
+def build_db_config(raw_config, domain_name):
+    return {
+        'host': resolve_db_host_for_domain(raw_config, domain_name),
+        'port': int(raw_config['DB_PORT']),
+        'user': raw_config['DB_USER'],
+        'password': raw_config['DB_PASSWORD'],
+        'database': raw_config['DB_NAME'],
+        'charset': raw_config['DB_CHARSET'],
+    }
+
+
+def get_user_data(db_config, existing_only=True):
     try:
-        connection = pymysql.connect(**DB_CONFIG)
+        connection = pymysql.connect(**db_config)
         cursor = connection.cursor()
 
-        where_clauses = [
-            "dc.existing = %s",
-            "NULLIF(TRIM(dc.server_id), '') IS NOT NULL",
-        ]
-        params = [1 if existing_only else 0]
-
-        where_sql = " AND ".join(where_clauses)
-
-        # 사용자 정보 조회 쿼리
-        query = f"""
+        query = """
         SELECT
             '' AS '존재여부',
             u.name AS '이름',
@@ -106,288 +117,218 @@ def get_user_data(existing_only=True):
         LEFT JOIN `group` g ON u.ubuntu_gid = g.ubuntu_gid
         JOIN docker_container dc ON u.id = dc.user_id
         LEFT JOIN used_ports up ON dc.id = up.docker_container_record_id
-        WHERE {where_sql}
+        WHERE dc.existing = %s
+          AND NULLIF(TRIM(dc.server_id), '') IS NOT NULL
         GROUP BY u.id, dc.id
         ORDER BY dc.server_id ASC, u.name ASC;
         """
 
-        cursor.execute(query, params)
+        cursor.execute(query, [1 if existing_only else 0])
         columns = [desc[0] for desc in cursor.description]
         rows = cursor.fetchall()
-
         cursor.close()
         connection.close()
-
         return columns, rows
-
-    except pymysql.Error as e:
-        print(f"데이터베이스 오류: {e}")
+    except pymysql.Error as exc:
+        print(f'데이터베이스 오류: {exc}')
         sys.exit(1)
 
-def create_excel_sheet(wb, sheet_name, columns, data):
-    """워크북에 시트를 생성하고 데이터를 작성"""
-    # 첫 번째 시트인 경우 active 시트 사용, 아니면 새 시트 생성
-    if len(wb.sheetnames) == 1 and wb.active.title == 'Sheet':
-        ws = wb.active
-        ws.title = sheet_name
+
+def create_excel_sheet(workbook, sheet_name, columns, data):
+    if len(workbook.sheetnames) == 1 and workbook.active.title == 'Sheet':
+        worksheet = workbook.active
+        worksheet.title = sheet_name
     else:
-        ws = wb.create_sheet(title=sheet_name)
+        worksheet = workbook.create_sheet(title=sheet_name)
 
-    # 헤더 스타일 설정
-    header_font = Font(bold=True, color="FFFFFF")
-    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    header_alignment = Alignment(horizontal="center", vertical="center")
+    header_font = Font(bold=True, color='FFFFFF')
+    header_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
+    header_alignment = Alignment(horizontal='center', vertical='center')
 
-    # 헤더 작성
     for col_idx, column_name in enumerate(columns, start=1):
-        cell = ws.cell(row=1, column=col_idx)
+        cell = worksheet.cell(row=1, column=col_idx)
         cell.value = column_name
         cell.font = header_font
         cell.fill = header_fill
         cell.alignment = header_alignment
 
-    # 데이터 작성
     for row_idx, row_data in enumerate(data, start=2):
         for col_idx, value in enumerate(row_data, start=1):
-            cell = ws.cell(row=row_idx, column=col_idx)
+            cell = worksheet.cell(row=row_idx, column=col_idx)
             cell.value = value
-            cell.alignment = Alignment(vertical="center")
+            cell.alignment = Alignment(vertical='center')
 
-    # 컬럼 너비 자동 조정
-    for column in ws.columns:
+    for column in worksheet.columns:
         max_length = 0
         column_letter = column[0].column_letter
-
         for cell in column:
             try:
                 if cell.value:
                     max_length = max(max_length, len(str(cell.value)))
-            except:
+            except Exception:
                 pass
+        worksheet.column_dimensions[column_letter].width = min(max_length + 2, 50)
 
-        adjusted_width = min(max_length + 2, 50)  # 최대 50으로 제한
-        ws.column_dimensions[column_letter].width = adjusted_width
+    return worksheet
 
-    return ws
-
-def create_excel(active_columns, active_data, deleted_columns, deleted_data, filename, domain):
-    """엑셀 파일 생성 (활성 시트와 삭제된 시트 포함)"""
-    wb = Workbook()
-
-    # 활성 사용자 시트
-    create_excel_sheet(wb, domain, active_columns, active_data)
-    print(f"✓ '{domain}' 시트 생성 완료: {len(active_data)}개의 레코드")
-
-    # 삭제된 사용자 시트는 항상 생성해 활성/삭제 탭 구성을 고정한다.
-    create_excel_sheet(wb, f"{domain}(deleted)", deleted_columns, deleted_data)
-    print(f"✓ '{domain}(deleted)' 시트 생성 완료: {len(deleted_data)}개의 레코드")
-
-    # 파일 저장
-    try:
-        wb.save(filename)
-        print(f"✓ 엑셀 파일이 성공적으로 생성되었습니다: {filename}")
-    except Exception as e:
-        print(f"파일 저장 오류: {e}")
-        sys.exit(1)
 
 def get_google_sheets_service(credentials_path):
-    """Google Sheets API 서비스 객체 생성"""
     try:
-        credentials = service_account.Credentials.from_service_account_file(
-            credentials_path, scopes=SCOPES)
-        service = build('sheets', 'v4', credentials=credentials)
-        return service
-    except Exception as e:
-        print(f"Google Sheets 인증 오류: {e}")
+        credentials = service_account.Credentials.from_service_account_file(credentials_path, scopes=SCOPES)
+        return build('sheets', 'v4', credentials=credentials)
+    except Exception as exc:
+        print(f'Google Sheets 인증 오류: {exc}')
         return None
 
+
 def ensure_sheet_exists(service, sheet_name):
-    """시트가 존재하는지 확인하고, 없으면 생성"""
     try:
         spreadsheet = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
-        sheets = spreadsheet.get('sheets', [])
-
-        # 시트가 이미 존재하는지 확인
-        for sheet in sheets:
+        for sheet in spreadsheet.get('sheets', []):
             if sheet['properties']['title'] == sheet_name:
                 print(f"✓ '{sheet_name}' 시트가 이미 존재합니다.")
                 return sheet['properties']['sheetId']
 
-        # 시트가 없으면 새로 생성
-        print(f"'{sheet_name}' 시트를 생성합니다...")
-        requests = [{
-            'addSheet': {
-                'properties': {
-                    'title': sheet_name
-                }
-            }
-        }]
-
         response = service.spreadsheets().batchUpdate(
             spreadsheetId=SPREADSHEET_ID,
-            body={'requests': requests}
+            body={'requests': [{'addSheet': {'properties': {'title': sheet_name}}}]},
         ).execute()
-
         sheet_id = response['replies'][0]['addSheet']['properties']['sheetId']
         print(f"✓ '{sheet_name}' 시트가 생성되었습니다.")
         return sheet_id
-
-    except HttpError as e:
-        print(f"시트 확인/생성 오류: {e}")
+    except HttpError as exc:
+        print(f'시트 확인/생성 오류: {exc}')
         return None
 
-def update_google_sheet(service, columns, data, sheet_name='LAB'):
-    """Google Sheets에 데이터 업데이트"""
+
+def format_header(service, num_columns, sheet_id):
     try:
-        # 시트가 존재하는지 확인하고, 없으면 생성
+        requests = [{
+            'repeatCell': {
+                'range': {
+                    'sheetId': sheet_id,
+                    'startRowIndex': 0,
+                    'endRowIndex': 1,
+                    'startColumnIndex': 0,
+                    'endColumnIndex': num_columns,
+                },
+                'cell': {
+                    'userEnteredFormat': {
+                        'backgroundColor': {'red': 0.267, 'green': 0.447, 'blue': 0.769},
+                        'textFormat': {
+                            'bold': True,
+                            'foregroundColor': {'red': 1.0, 'green': 1.0, 'blue': 1.0},
+                        },
+                        'horizontalAlignment': 'CENTER',
+                        'verticalAlignment': 'MIDDLE',
+                    }
+                },
+                'fields': 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
+            }
+        }]
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={'requests': requests},
+        ).execute()
+        print('✓ Google Sheets 헤더 서식 적용 완료')
+    except HttpError as exc:
+        print(f'헤더 서식 적용 오류: {exc}')
+
+
+def update_google_sheet(service, columns, data, sheet_name):
+    try:
         sheet_id = ensure_sheet_exists(service, sheet_name)
         if sheet_id is None:
             return False
 
-        # 데이터 준비 (헤더 + 데이터 행)
-        values = [list(columns)]  # 헤더 행
-        for row in data:
-            # None 값을 빈 문자열로 변환
-            cleaned_row = ['' if v is None else str(v) for v in row]
-            values.append(cleaned_row)
+        values = [list(columns)]
+        values.extend([['' if value is None else str(value) for value in row] for row in data])
 
-        # 시트 범위 계산 (LAB 시트의 A1부터 시작)
-        sheet_range = f'{sheet_name}!A1'
-
-        # 기존 데이터 삭제
         service.spreadsheets().values().clear(
             spreadsheetId=SPREADSHEET_ID,
-            range=f'{sheet_name}!A:Z'
+            range=f'{sheet_name}!A:Z',
         ).execute()
-
-        # 새 데이터 업데이트
-        body = {
-            'values': values
-        }
 
         result = service.spreadsheets().values().update(
             spreadsheetId=SPREADSHEET_ID,
-            range=sheet_range,
+            range=f'{sheet_name}!A1',
             valueInputOption='RAW',
-            body=body
+            body={'values': values},
         ).execute()
 
-        # 헤더 서식 적용 (배경색, 볼드)
         format_header(service, len(columns), sheet_id)
-
         updated_cells = result.get('updatedCells', 0)
         print(f"✓ Google Sheets '{sheet_name}' 시트 업데이트 완료: {updated_cells}개의 셀이 업데이트되었습니다.")
         return True
-
-    except HttpError as e:
-        print(f"Google Sheets API 오류: {e}")
+    except HttpError as exc:
+        print(f'Google Sheets API 오류: {exc}')
         return False
-    except Exception as e:
-        print(f"Google Sheets 업데이트 오류: {e}")
+    except Exception as exc:
+        print(f'Google Sheets 업데이트 오류: {exc}')
         return False
 
-def format_header(service, num_columns, sheet_id):
-    """Google Sheets 헤더에 서식 적용 (배경색, 볼드)"""
-    try:
-        requests = [
-            {
-                'repeatCell': {
-                    'range': {
-                        'sheetId': sheet_id,
-                        'startRowIndex': 0,
-                        'endRowIndex': 1,
-                        'startColumnIndex': 0,
-                        'endColumnIndex': num_columns
-                    },
-                    'cell': {
-                        'userEnteredFormat': {
-                            'backgroundColor': {
-                                'red': 0.267,
-                                'green': 0.447,
-                                'blue': 0.769
-                            },
-                            'textFormat': {
-                                'bold': True,
-                                'foregroundColor': {
-                                    'red': 1.0,
-                                    'green': 1.0,
-                                    'blue': 1.0
-                                }
-                            },
-                            'horizontalAlignment': 'CENTER',
-                            'verticalAlignment': 'MIDDLE'
-                        }
-                    },
-                    'fields': 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)'
-                }
-            }
-        ]
-
-        service.spreadsheets().batchUpdate(
-            spreadsheetId=SPREADSHEET_ID,
-            body={'requests': requests}
-        ).execute()
-
-        print(f"✓ Google Sheets 헤더 서식 적용 완료")
-
-    except HttpError as e:
-        print(f"헤더 서식 적용 오류: {e}")
 
 def main():
-    """메인 함수"""
-    print("=" * 60)
-    print("사용자 정보 엑셀 추출 스크립트")
-    print("=" * 60)
+    args = parse_args()
+    raw_config = load_raw_config()
+    domains = resolve_domains(raw_config, args.domains)
 
-    # 스크립트의 상위 디렉토리 경로 (UID-GID-Management-System)
+    print('=' * 60)
+    print('사용자 정보 엑셀 추출 스크립트')
+    print('=' * 60)
+
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir)
-
-    # 엑셀 데이터 저장 디렉토리 생성
-    export_dir = os.path.join(project_root, "excel_exports")
+    export_dir = os.path.join(project_root, 'excel_exports')
     os.makedirs(export_dir, exist_ok=True)
 
-    # 현재 날짜로 파일명 생성
-    today = datetime.now().strftime("%Y-%m-%d")
-    filename = os.path.join(export_dir, f"user_export_{today}.xlsx")
+    today = datetime.now().strftime('%Y-%m-%d')
+    filename = os.path.join(export_dir, f'user_export_{today}.xlsx')
 
-    print(f"\n저장 디렉토리: {export_dir}")
-    print(f"서버 도메인: {SERVER_DOMAIN}")
-    print(f"데이터베이스 연결 중... ({DB_CONFIG['host']}:{DB_CONFIG['port']})")
+    print(f'\n저장 디렉토리: {export_dir}')
+    print(f'대상 도메인: {", ".join(domains)}')
 
-    # 활성 사용자 데이터 조회 (existing=1)
-    print(f"\n활성 사용자 데이터 조회 중...")
-    active_columns, active_data = get_user_data(existing_only=True)
-    print(f"✓ 활성 사용자 데이터 조회 완료: {len(active_data)}개의 레코드")
+    workbook = Workbook()
 
-    # 삭제된 사용자 데이터 조회 (existing=0)
-    print(f"\n삭제된 사용자 데이터 조회 중...")
-    deleted_columns, deleted_data = get_user_data(existing_only=False)
-    print(f"✓ 삭제된 사용자 데이터 조회 완료: {len(deleted_data)}개의 레코드")
+    for domain in domains:
+        db_config = build_db_config(raw_config, domain)
+        print(f'\n[{domain}] 데이터베이스 연결 중... ({db_config["host"]}:{db_config["port"]})')
 
-    # 엑셀 파일 생성
-    print(f"\n엑셀 파일 생성 중: {os.path.basename(filename)}")
-    create_excel(active_columns, active_data, deleted_columns, deleted_data, filename, SERVER_DOMAIN)
+        print(f'[{domain}] 활성 사용자 데이터 조회 중...')
+        active_columns, active_data = get_user_data(db_config, existing_only=True)
+        print(f"✓ [{domain}] 활성 사용자 데이터 조회 완료: {len(active_data)}개의 레코드")
 
-    # Google Sheets 업데이트
-    print(f"\nGoogle Sheets 업데이트 중...")
-    credentials_path = os.path.join(project_root, "user-management-478704-d311d4ce0dc3.json")
+        print(f'[{domain}] 삭제된 사용자 데이터 조회 중...')
+        deleted_columns, deleted_data = get_user_data(db_config, existing_only=False)
+        print(f"✓ [{domain}] 삭제된 사용자 데이터 조회 완료: {len(deleted_data)}개의 레코드")
 
+        create_excel_sheet(workbook, domain, active_columns, active_data)
+        create_excel_sheet(workbook, f'{domain}(deleted)', deleted_columns, deleted_data)
+
+    print(f'\n엑셀 파일 생성 중: {os.path.basename(filename)}')
+    workbook.save(filename)
+    print(f'✓ 엑셀 파일이 성공적으로 생성되었습니다: {filename}')
+
+    print('\nGoogle Sheets 업데이트 중...')
+    credentials_path = os.path.join(project_root, 'config', 'user-management-478704-d311d4ce0dc3.json')
     if os.path.exists(credentials_path):
         service = get_google_sheets_service(credentials_path)
         if service:
-            # 활성 사용자 시트 업데이트
-            update_google_sheet(service, active_columns, active_data, sheet_name=SERVER_DOMAIN)
-            # 삭제된 사용자 시트도 항상 갱신해 기존 탭 구조를 유지한다.
-            update_google_sheet(service, deleted_columns, deleted_data, sheet_name=f"{SERVER_DOMAIN}(deleted)")
+            for domain in domains:
+                db_config = build_db_config(raw_config, domain)
+                active_columns, active_data = get_user_data(db_config, existing_only=True)
+                deleted_columns, deleted_data = get_user_data(db_config, existing_only=False)
+                update_google_sheet(service, active_columns, active_data, sheet_name=domain)
+                update_google_sheet(service, deleted_columns, deleted_data, sheet_name=f'{domain}(deleted)')
         else:
-            print("⚠ Google Sheets 서비스 연결 실패")
+            print('⚠ Google Sheets 서비스 연결 실패')
     else:
-        print(f"⚠ 인증 파일을 찾을 수 없습니다: {credentials_path}")
+        print(f'⚠ 인증 파일을 찾을 수 없습니다: {credentials_path}')
 
-    print("\n" + "=" * 60)
-    print("작업 완료!")
-    print("=" * 60)
+    print('\n' + '=' * 60)
+    print('작업 완료!')
+    print('=' * 60)
 
-if __name__ == "__main__":
+
+if __name__ == '__main__':
     main()
