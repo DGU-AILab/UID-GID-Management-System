@@ -98,9 +98,16 @@ server_id="$(compose_server_id "$domain_name" "$server_number")"
 expected_target_host="$(compose_ansible_host_alias "$domain_name" "$server_number")"
 db_host="$(resolve_db_host_for_domain "$domain_name")" || exit 1
 
+require_mysql_cli || exit 1
+require_ansible_cli || exit 1
 require_ansible_inventory || exit 1
 ensure_ansible_host_exists "$expected_target_host" || exit 1
 create_mysql_client_config "$db_host"
+
+if ! mysql_exec -e "SELECT 1;" >/dev/null 2>&1; then
+  echo "Error: Failed to connect to database $DB_NAME on $db_host"
+  exit 1
+fi
 
 if [ -n "$container_id" ]; then
   db_container=$(mysql_exec -N -e "

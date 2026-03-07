@@ -128,6 +128,31 @@ require_ansible_inventory() {
   fi
 }
 
+require_command() {
+  local command_name="$1"
+  local install_hint="${2:-}"
+
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "Error: required command '$command_name' is not installed or not in PATH." >&2
+    if [ -n "$install_hint" ]; then
+      echo "Hint: $install_hint" >&2
+    fi
+    return 1
+  fi
+}
+
+require_ansible_cli() {
+  require_command "ansible" "install Ansible on the management server and verify ANSIBLE_INVENTORY."
+}
+
+require_mysql_cli() {
+  require_command "mysql" "install a MySQL client on the management server. Example: sudo apt install mysql-client"
+}
+
+require_mysqldump_cli() {
+  require_command "mysqldump" "install MySQL client tools on the management server. Example: sudo apt install mysql-client"
+}
+
 ensure_ansible_host_exists() {
   local host_alias="$1"
   local output
@@ -201,6 +226,8 @@ run_remote_shell_capture() {
 backup_database_locally() {
   local domain_name="$1"
   local backup_dir temp_file timestamp backup_file
+
+  require_mysqldump_cli || return 1
 
   backup_dir="${BACKUP_ROOT_DIR}/$(echo "$domain_name" | tr '[:upper:]' '[:lower:]')"
   mkdir -p "$backup_dir"
