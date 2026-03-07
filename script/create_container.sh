@@ -4,27 +4,28 @@
 
 # MySQL Connection
 # MySQL 연결 정보
-# Load database configuration from db_config.env
+# Load database configuration from db_config.local.env or db_config.env
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "${SCRIPT_DIR}/db_config.env" ]; then
-  source "${SCRIPT_DIR}/db_config.env"
-  DB_ADDRESS=$DB_HOST
-  DB_PORT=$DB_PORT
-  DB_NAME=$DB_NAME
-  DB_USER=$DB_USER
-  DB_PASSWORD=$DB_PASSWORD
+if [ -f "${SCRIPT_DIR}/db_config.local.env" ]; then
+  DB_CONFIG_FILE="${SCRIPT_DIR}/db_config.local.env"
+elif [ -f "${SCRIPT_DIR}/db_config.env" ]; then
+  DB_CONFIG_FILE="${SCRIPT_DIR}/db_config.env"
 else
-  echo "Error: db_config.env not found"
+  echo "Error: db_config.local.env or db_config.env not found"
+  echo "Hint: copy script/db_config.example.env to script/db_config.local.env"
   exit 1
 fi
+
+source "${DB_CONFIG_FILE}"
+DB_ADDRESS=$DB_HOST
 
 # ==============================
 
 # Create a ~/.my.cnf file
 # ~/.my.cnf 파일 생성
 echo "[client]
-user=nfs_user
-password=nfs_password
+user=$DB_USER
+password=$DB_PASSWORD
 host=$DB_ADDRESS
 port=$DB_PORT" >~/.my.cnf
 

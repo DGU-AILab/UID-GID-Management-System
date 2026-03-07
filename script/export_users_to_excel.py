@@ -18,12 +18,28 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+def resolve_db_config_path():
+    """우선순위에 따라 DB 설정 파일 경로를 반환합니다."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(script_dir, 'db_config.local.env'),
+        os.path.join(script_dir, 'db_config.env'),
+    ]
+
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+
+    raise FileNotFoundError(
+        "db_config.local.env or db_config.env not found. "
+        "Copy db_config.example.env to db_config.local.env first."
+    )
+
 # 데이터베이스 연결 정보
 def load_db_config():
-    """db_config.env 파일에서 데이터베이스 설정을 읽어옵니다."""
+    """DB 설정 파일에서 데이터베이스 설정을 읽어옵니다."""
     config = {}
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    config_file = os.path.join(script_dir, 'db_config.env')
+    config_file = resolve_db_config_path()
 
     with open(config_file, 'r') as f:
         for line in f:
