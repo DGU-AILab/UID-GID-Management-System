@@ -276,6 +276,8 @@ bash script_test/delete_container.sh \
 - `uid-gid-export.timer`
 - `uid-gid-reminder.service`
 - `uid-gid-reminder.timer`
+- `uid-gid-daily-maintenance.service`
+- `uid-gid-daily-maintenance.timer`
 
 장점:
 
@@ -284,7 +286,48 @@ bash script_test/delete_container.sh \
 - unit 파일을 저장소에 두고 버전 관리 가능
 - Ansible로 배포 가능
 
+현재 저장소에는 백업 + 만료 메일을 함께 매일 실행하는 설치 스크립트가 포함되어 있습니다.
+
+먼저 타이머 설정 파일을 준비합니다.
+
+```bash
+cp config/daily_maintenance.example.env config/daily_maintenance.local.env
+```
+
+설정 가능한 주요 값:
+
+- `DAILY_MAINTENANCE_ON_CALENDAR`
+- `DAILY_MAINTENANCE_LOG_FILE`
+- `DAILY_MAINTENANCE_LOG_ROTATE_COUNT`
+- `DAILY_MAINTENANCE_DOMAINS`
+
+설치:
+
+```bash
+bash script/install_daily_maintenance_timer.sh
+```
+
+기본 스케줄은 한국 시간 기준 매일 `11:00` 입니다. 설정 파일 값을 바꾸고 아래 명령을 다시 실행하면 기존 unit/timer/logrotate 설정도 현재 값으로 갱신됩니다.
+
+설정 파일 대신 일회성으로 다른 시간으로 설치하려면:
+
+```bash
+bash script/install_daily_maintenance_timer.sh --on-calendar "*-*-* 06:00:00 Asia/Seoul"
+```
+
+이미 unit이 있어도 현재 설정 파일 기준으로 내용을 비교해서 필요하면 갱신하고, 변경이 없으면 up-to-date 라고 알려줍니다. timer는 다시 읽고 활성 상태로 맞춥니다.
+
+로그 경로와 보관 일수도 설정 파일에서 바꿀 수 있습니다. logrotate 설정을 함께 설치하며, 기본값은 `/var/log/uid-gid-daily-maintenance.log` 와 `14일` 보관입니다.
+
+즉시 1회 실행:
+
+```bash
+sudo systemctl start uid-gid-daily-maintenance.service
+```
+
 ## 참고
 
 - example 파일은 샘플입니다. 실제 운영값은 `*.local.env` 에 넣어야 합니다.
-- `config/*.local.env`, `config/*.json` 은 git ignore 대상입니다.
+- `config/*.local.env`, `config/*.local.json` 은 git ignore 대상입니다.
+- `config/*.example.json` 은 저장소에 포함됩니다.
+- `config/*.example.env` 도 저장소에 포함됩니다.
