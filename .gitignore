@@ -8,6 +8,9 @@ config/email_config.local.env
 # Excel exports
 excel_exports/
 
+# Logs
+*.log
+
 # Python cache
 __pycache__/
 *.py[cod]
