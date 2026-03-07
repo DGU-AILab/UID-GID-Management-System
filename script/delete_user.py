@@ -20,17 +20,14 @@ import os
 def resolve_db_config_path():
     """우선순위에 따라 DB 설정 파일 경로를 반환합니다."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(script_dir, 'db_config.local.env'),
-        os.path.join(script_dir, 'db_config.env'),
-    ]
+    candidates = [os.path.join(script_dir, 'db_config.local.env')]
 
     for path in candidates:
         if os.path.exists(path):
             return path
 
     raise FileNotFoundError(
-        "db_config.local.env or db_config.env not found. "
+        "db_config.local.env not found. "
         "Copy db_config.example.env to db_config.local.env first."
     )
 

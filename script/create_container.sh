@@ -4,14 +4,12 @@
 
 # MySQL Connection
 # MySQL 연결 정보
-# Load database configuration from db_config.local.env or db_config.env
+# Load database configuration from db_config.local.env
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "${SCRIPT_DIR}/db_config.local.env" ]; then
   DB_CONFIG_FILE="${SCRIPT_DIR}/db_config.local.env"
-elif [ -f "${SCRIPT_DIR}/db_config.env" ]; then
-  DB_CONFIG_FILE="${SCRIPT_DIR}/db_config.env"
 else
-  echo "Error: db_config.local.env or db_config.env not found"
+  echo "Error: db_config.local.env not found"
   echo "Hint: copy script/db_config.example.env to script/db_config.local.env"
   exit 1
 fi
