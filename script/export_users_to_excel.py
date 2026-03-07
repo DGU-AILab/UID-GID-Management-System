@@ -60,8 +60,13 @@ def get_user_data(existing_only=True):
         connection = pymysql.connect(**DB_CONFIG)
         cursor = connection.cursor()
 
-        # existing 조건 추가
-        existing_condition = "dc.existing = TRUE" if existing_only else "dc.existing = FALSE"
+        where_clauses = [
+            "dc.existing = %s",
+            "NULLIF(TRIM(dc.server_id), '') IS NOT NULL",
+        ]
+        params = [1 if existing_only else 0]
+
+        where_sql = " AND ".join(where_clauses)
 
         # 사용자 정보 조회 쿼리
         query = f"""
@@ -86,14 +91,14 @@ def get_user_data(existing_only=True):
             u.note AS '비고'
         FROM user u
         LEFT JOIN `group` g ON u.ubuntu_gid = g.ubuntu_gid
-        LEFT JOIN docker_container dc ON u.id = dc.user_id
+        JOIN docker_container dc ON u.id = dc.user_id
         LEFT JOIN used_ports up ON dc.id = up.docker_container_record_id
-        WHERE {existing_condition}
+        WHERE {where_sql}
         GROUP BY u.id, dc.id
         ORDER BY dc.server_id ASC, u.name ASC;
         """
 
-        cursor.execute(query)
+        cursor.execute(query, params)
         columns = [desc[0] for desc in cursor.description]
         rows = cursor.fetchall()
 
@@ -160,10 +165,9 @@ def create_excel(active_columns, active_data, deleted_columns, deleted_data, fil
     create_excel_sheet(wb, domain, active_columns, active_data)
     print(f"✓ '{domain}' 시트 생성 완료: {len(active_data)}개의 레코드")
 
-    # 삭제된 사용자 시트
-    if deleted_data:
-        create_excel_sheet(wb, f"{domain}(deleted)", deleted_columns, deleted_data)
-        print(f"✓ '{domain}(deleted)' 시트 생성 완료: {len(deleted_data)}개의 레코드")
+    # 삭제된 사용자 시트는 항상 생성해 활성/삭제 탭 구성을 고정한다.
+    create_excel_sheet(wb, f"{domain}(deleted)", deleted_columns, deleted_data)
+    print(f"✓ '{domain}(deleted)' 시트 생성 완료: {len(deleted_data)}개의 레코드")
 
     # 파일 저장
     try:
@@ -361,9 +365,8 @@ def main():
         if service:
             # 활성 사용자 시트 업데이트
             update_google_sheet(service, active_columns, active_data, sheet_name=SERVER_DOMAIN)
-            # 삭제된 사용자 시트 업데이트
-            if deleted_data:
-                update_google_sheet(service, deleted_columns, deleted_data, sheet_name=f"{SERVER_DOMAIN}(deleted)")
+            # 삭제된 사용자 시트도 항상 갱신해 기존 탭 구조를 유지한다.
+            update_google_sheet(service, deleted_columns, deleted_data, sheet_name=f"{SERVER_DOMAIN}(deleted)")
         else:
             print("⚠ Google Sheets 서비스 연결 실패")
     else:
