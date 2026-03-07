@@ -25,6 +25,8 @@ CREATE TABLE
         ubuntu_username VARCHAR(255) NOT NULL,
         ubuntu_uid INT NOT NULL,
         ubuntu_gid INT,
+        email VARCHAR(255),
+        phone VARCHAR(32),
         note TEXT,
         UNIQUE KEY unique_uid (ubuntu_uid),
         FOREIGN KEY (ubuntu_uid) REFERENCES used_ids (id),
