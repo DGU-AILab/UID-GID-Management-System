@@ -281,6 +281,20 @@ def build_email_groups(
     return grouped
 
 
+def group_rows_by_person(rows: List[Dict[str, object]]) -> List[Tuple[str, List[Dict[str, object]]]]:
+    grouped: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row["name"]).strip()].append(row)
+
+    return [
+        (
+            person_name,
+            sorted(person_rows, key=lambda item: (str(item["server_id"]), str(item["container_name"]))),
+        )
+        for person_name, person_rows in sorted(grouped.items(), key=lambda item: item[0])
+    ]
+
+
 def build_email_message(
     smtp_config: Dict[str, object],
     recipient_email: str,
@@ -292,6 +306,7 @@ def build_email_message(
     expiring_dates = sorted({str(row["expiring_date"]) for row in rows})
     support_manual_url = str(smtp_config.get("support_manual_url") or "").strip()
     error_report_form_url = str(smtp_config.get("error_report_form_url") or "").strip()
+    person_groups = group_rows_by_person(rows)
 
     lines = [
         f"안녕하세요, {salutation}님.",
@@ -300,16 +315,29 @@ def build_email_message(
         "",
     ]
 
-    for row in rows:
-        allocated_ports = row["allocated_ports"] or "없음"
+    for person_name, person_rows in person_groups:
+        login_ids = ", ".join(
+            sorted({str(row["ubuntu_username"]).strip() for row in person_rows if row["ubuntu_username"]})
+        )
         lines.extend(
             [
-                f"- 이름: {row['name']}",
-                f"  로그인 아이디: {row['ubuntu_username']}",
-                f"  배정 서버: {row['server_id']}",
-                f"  컨테이너 명: {row['container_name']}",
-                f"  사용 중인 포트 번호: {allocated_ports}",
-                f"  서버 사용 완료 예정일: {row['expiring_date']}",
+                f"- 이름: {person_name}",
+                f"  로그인 아이디: {login_ids or '없음'}",
+                "  컨테이너 목록:",
+            ]
+        )
+        for row in person_rows:
+            allocated_ports = row["allocated_ports"] or "없음"
+            lines.extend(
+                [
+                    f"    - 배정 서버: {row['server_id']}",
+                    f"      컨테이너 명: {row['container_name']}",
+                    f"      사용 중인 포트 번호: {allocated_ports}",
+                    f"      서버 사용 완료 예정일: {row['expiring_date']}",
+                ]
+            )
+        lines.extend(
+            [
                 "",
             ]
         )
@@ -335,16 +363,29 @@ def build_email_message(
         ]
     )
 
-    for row in rows:
-        allocated_ports = row["allocated_ports"] or "N/A"
+    for person_name, person_rows in person_groups:
+        login_ids = ", ".join(
+            sorted({str(row["ubuntu_username"]).strip() for row in person_rows if row["ubuntu_username"]})
+        )
         lines.extend(
             [
-                f"- Name: {row['name']}",
-                f"  Login ID: {row['ubuntu_username']}",
-                f"  Assigned Server: {row['server_id']}",
-                f"  Container Name: {row['container_name']}",
-                f"  Ports in Use: {allocated_ports}",
-                f"  Scheduled Expiration Date: {row['expiring_date']}",
+                f"- Name: {person_name}",
+                f"  Login ID: {login_ids or 'N/A'}",
+                "  Container List:",
+            ]
+        )
+        for row in person_rows:
+            allocated_ports = row["allocated_ports"] or "N/A"
+            lines.extend(
+                [
+                    f"    - Assigned Server: {row['server_id']}",
+                    f"      Container Name: {row['container_name']}",
+                    f"      Ports in Use: {allocated_ports}",
+                    f"      Scheduled Expiration Date: {row['expiring_date']}",
+                ]
+            )
+        lines.extend(
+            [
                 "",
             ]
         )
