@@ -43,14 +43,7 @@ def resolve_db_config_path():
 
 
 def resolve_google_client_credentials_path(project_root):
-    candidates = [
-        os.path.join(project_root, 'config', 'google-client.json'),
-        os.path.join(project_root, 'config', 'user-management-478704-d311d4ce0dc3.json'),
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    return candidates[0]
+    return os.path.join(project_root, 'config', 'google-client.local.json')
 
 
 def load_raw_config():
