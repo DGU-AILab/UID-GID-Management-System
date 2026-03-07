@@ -42,6 +42,17 @@ def resolve_db_config_path():
     )
 
 
+def resolve_google_client_credentials_path(project_root):
+    candidates = [
+        os.path.join(project_root, 'config', 'google-client.json'),
+        os.path.join(project_root, 'config', 'user-management-478704-d311d4ce0dc3.json'),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[0]
+
+
 def load_raw_config():
     config = {}
     with open(resolve_db_config_path(), 'r', encoding='utf-8') as handle:
@@ -310,7 +321,7 @@ def main():
     print(f'✓ 엑셀 파일이 성공적으로 생성되었습니다: {filename}')
 
     print('\nGoogle Sheets 업데이트 중...')
-    credentials_path = os.path.join(project_root, 'config', 'user-management-478704-d311d4ce0dc3.json')
+    credentials_path = resolve_google_client_credentials_path(project_root)
     if os.path.exists(credentials_path):
         service = get_google_sheets_service(credentials_path)
         if service:

@@ -17,9 +17,10 @@
 config/
   db_config.example.env
   email_config.example.env
+  google-client.example.json
   db_config.local.env           # 로컬 전용, git ignore
   email_config.local.env        # 로컬 전용, git ignore
-  user-management-....json      # Google Sheets 인증 JSON, git ignore
+  google-client.json            # Google Sheets 인증 JSON, git ignore
 
 script/
   common_domain_db.sh
@@ -118,6 +119,15 @@ cp config/email_config.example.env config/email_config.local.env
 ### Google Sheets 설정
 
 Google Sheets를 갱신하려면 서비스 계정 JSON 파일을 `config/` 아래에 두어야 합니다.
+
+예시 파일:
+
+```bash
+cp config/google-client.example.json \
+   config/google-client.json
+```
+
+그 다음 실제 서비스 계정 값으로 내용을 채워야 합니다.
 
 ## 주요 명령
 
