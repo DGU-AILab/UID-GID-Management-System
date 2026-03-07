@@ -147,6 +147,8 @@ def load_smtp_config() -> Dict[str, object]:
         "reply_to": get_value("SMTP_REPLY_TO"),
         "to_override": get_value("EMAIL_TO_OVERRIDE"),
         "timeout": int(get_value("SMTP_TIMEOUT", "30")),
+        "support_manual_url": get_value("SUPPORT_MANUAL_URL"),
+        "error_report_form_url": get_value("ERROR_REPORT_FORM_URL"),
     }
 
 
@@ -219,8 +221,14 @@ def fetch_pending_reminders(
             u.email,
             dc.server_id,
             dc.container_name,
-            dc.image,
-            dc.image_version,
+            (
+                SELECT GROUP_CONCAT(
+                    up.port_number
+                    ORDER BY up.port_number SEPARATOR ', '
+                )
+                FROM used_ports up
+                WHERE up.docker_container_record_id = dc.id
+            ) AS allocated_ports,
             DATE(dc.expiring_at) AS expiring_date,
             DATEDIFF(DATE(dc.expiring_at), %s) AS reminder_days
         FROM docker_container dc
@@ -282,6 +290,8 @@ def build_email_message(
     display_names = sorted({str(row["name"]).strip() for row in rows if row["name"]})
     salutation = ", ".join(display_names) if display_names else "사용자"
     expiring_dates = sorted({str(row["expiring_date"]) for row in rows})
+    support_manual_url = str(smtp_config.get("support_manual_url") or "").strip()
+    error_report_form_url = str(smtp_config.get("error_report_form_url") or "").strip()
 
     lines = [
         f"안녕하세요, {salutation}님.",
@@ -291,14 +301,14 @@ def build_email_message(
     ]
 
     for row in rows:
+        allocated_ports = row["allocated_ports"] or "없음"
         lines.extend(
             [
                 f"- 이름: {row['name']}",
                 f"  로그인 아이디: {row['ubuntu_username']}",
-                f"  도메인: {row['domain_name']}",
                 f"  배정 서버: {row['server_id']}",
                 f"  컨테이너 명: {row['container_name']}",
-                f"  Docker 이미지: {row['image']}:{row['image_version']}",
+                f"  사용 중인 포트 번호: {allocated_ports}",
                 f"  서버 사용 완료 예정일: {row['expiring_date']}",
                 "",
             ]
@@ -306,9 +316,52 @@ def build_email_message(
 
     lines.extend(
         [
-            "연장 또는 종료 관련 문의가 있으면 서버 관리자에게 미리 알려주세요.",
+            "연장을 원하시면 매뉴얼을 참고하여 오류 신고 폼을 제출해 주세요.",
+        ]
+    )
+    if support_manual_url:
+        lines.append(f"매뉴얼: {support_manual_url}")
+    if error_report_form_url:
+        lines.append(f"오류 신고 폼: {error_report_form_url}")
+    lines.extend(
+        [
             "",
-            "이 메일은 UID/GID Management System에서 자동 발송되었습니다.",
+            "이 메일은 UID/GID Management System에서 자동 발송되었으며, 이 주소는 회신을 받지 않습니다.",
+            "",
+            f"Hello, {salutation}.",
+            "",
+            f"The following container(s) will reach their scheduled expiration date in {reminder_days} day(s).",
+            "",
+        ]
+    )
+
+    for row in rows:
+        allocated_ports = row["allocated_ports"] or "N/A"
+        lines.extend(
+            [
+                f"- Name: {row['name']}",
+                f"  Login ID: {row['ubuntu_username']}",
+                f"  Assigned Server: {row['server_id']}",
+                f"  Container Name: {row['container_name']}",
+                f"  Ports in Use: {allocated_ports}",
+                f"  Scheduled Expiration Date: {row['expiring_date']}",
+                "",
+            ]
+        )
+
+    lines.extend(
+        [
+            "If you want to request an extension, please refer to the manual and submit the error report form.",
+        ]
+    )
+    if support_manual_url:
+        lines.append(f"Manual: {support_manual_url}")
+    if error_report_form_url:
+        lines.append(f"Error Report Form: {error_report_form_url}")
+    lines.extend(
+        [
+            "",
+            "This email was sent automatically by the UID/GID Management System, and replies to this address are not monitored.",
         ]
     )
 

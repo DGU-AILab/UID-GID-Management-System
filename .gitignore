@@ -1,6 +1,7 @@
 # Local credentials and configuration
 config/db_config.env
 config/*.local.env
+config/email_config.local.env
 config/*.json
 
 # Excel exports
