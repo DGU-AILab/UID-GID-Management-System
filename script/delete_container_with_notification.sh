@@ -215,9 +215,17 @@ if delete_output="$(bash "${RAW_DELETE_SCRIPT}" "${forward_args[@]}" 2>&1)"; the
 else
   delete_status=$?
 fi
-printf '%s\n' "$delete_output"
+while IFS= read -r output_line; do
+  [ -z "$output_line" ] && continue
+  if [[ "$output_line" == Error:* ]]; then
+    log_error "delete_script_output message=$(printf '%q' "$output_line")"
+  else
+    log_event "DELETE" "delete_script_output message=$(printf '%q' "$output_line")"
+  fi
+done <<<"$delete_output"
 
 if [ "$delete_status" -ne 0 ]; then
+  log_error "delete_wrapper_failed status=${delete_status}"
   exit "$delete_status"
 fi
 
@@ -231,9 +239,9 @@ fi
 
 if [ -z "$prefetch_row" ]; then
   if [ -n "$metadata_reason" ]; then
-    echo "Warning: container was deleted but no notification email was sent (${metadata_reason})." >&2
+    log_error "deletion_notification_skipped reason=${metadata_reason}"
   else
-    echo "Warning: container was deleted but no notification email was sent (metadata unavailable)." >&2
+    log_error "deletion_notification_skipped reason=metadata_unavailable"
   fi
   exit 0
 fi
@@ -241,12 +249,12 @@ fi
 IFS=$'\t' read -r actual_container_id actual_container_name actual_server_id user_name ubuntu_username recipient_email allocated_ports expiring_date <<<"$prefetch_row"
 
 if [ -z "$recipient_email" ]; then
-  echo "Warning: container was deleted but the user has no email address on file; skipping notification." >&2
+  log_error "deletion_notification_skipped reason=no_email container=${actual_container_name} server=${actual_server_id} username=${ubuntu_username}"
   exit 0
 fi
 
 if ! command -v python3 >/dev/null 2>&1; then
-  echo "Warning: container was deleted but python3 is not available; skipping notification email." >&2
+  log_error "deletion_notification_skipped reason=python3_missing container=${actual_container_name} server=${actual_server_id} username=${ubuntu_username}"
   exit 0
 fi
 
@@ -258,5 +266,5 @@ if ! python3 "${MAIL_SCRIPT}" \
   --container-name "$actual_container_name" \
   --allocated-ports "$allocated_ports" \
   --expiring-date "$expiring_date"; then
-  echo "Warning: container was deleted but failed to send notification email to ${recipient_email}." >&2
+  log_error "deletion_notification_failed recipient=${recipient_email} container=${actual_container_name} server=${actual_server_id} username=${ubuntu_username}"
 fi

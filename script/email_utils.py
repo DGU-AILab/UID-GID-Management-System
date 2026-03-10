@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import os
 import smtplib
+import sys
+from datetime import datetime
 from email.message import EmailMessage
 from email.utils import parseaddr
 from pathlib import Path
@@ -13,6 +15,11 @@ from typing import Dict, List
 DEFAULT_SMTP_HOST = "smtp-relay.gmail.com"
 DEFAULT_SMTP_PORT = 587
 DEFAULT_FROM_NAME = "DGU AILab Server Manager"
+
+
+def log_event(tag: str, message: str, *, stream=None) -> None:
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    print(f"{timestamp} [{tag}] {message}", file=stream or sys.stdout)
 
 
 def resolve_project_root(current_file: str) -> Path:

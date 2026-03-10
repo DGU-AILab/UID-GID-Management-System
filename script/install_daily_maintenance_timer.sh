@@ -161,7 +161,7 @@ fi
 
 cat >"${service_tmp}" <<EOF
 [Unit]
-Description=UID/GID daily maintenance (backups and reminder emails)
+Description=UID/GID daily maintenance (backups, reminder emails, expired cleanup)
 After=network-online.target
 Wants=network-online.target
 

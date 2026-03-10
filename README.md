@@ -371,7 +371,7 @@ python3 maintenance/update_user_emails_from_csv.py \
 - unit 파일을 저장소에 두고 버전 관리 가능
 - Ansible로 배포 가능
 
-현재 저장소에는 백업 + 만료 메일을 함께 매일 실행하는 설치 스크립트가 포함되어 있습니다.
+현재 저장소에는 백업 + 만료 메일 + 만료된 활성 컨테이너 정리를 함께 매일 실행하는 설치 스크립트가 포함되어 있습니다.
 
 먼저 타이머 설정 파일을 준비합니다.
 
@@ -385,6 +385,8 @@ cp config/daily_maintenance.example.env config/daily_maintenance.local.env
 - `DAILY_MAINTENANCE_LOG_FILE`
 - `DAILY_MAINTENANCE_LOG_ROTATE_COUNT`
 - `DAILY_MAINTENANCE_DOMAINS`
+
+`DAILY_MAINTENANCE_DOMAINS` 는 CSV 형식입니다. 두 도메인을 모두 돌리려면 `LAB,FARM` 으로 설정하면 됩니다.
 
 설치:
 
@@ -403,6 +405,13 @@ bash script/install_daily_maintenance_timer.sh --on-calendar "*-*-* 06:00:00 Asi
 이미 unit이 있어도 현재 설정 파일 기준으로 내용을 비교해서 필요하면 갱신하고, 변경이 없으면 up-to-date 라고 알려줍니다. timer는 다시 읽고 활성 상태로 맞춥니다.
 
 로그 경로와 보관 일수도 설정 파일에서 바꿀 수 있습니다. logrotate 설정을 함께 설치하며, 기본값은 `/var/log/uid-gid-daily-maintenance.log` 와 `14일` 보관입니다.
+
+daily maintenance 로그는 각 줄마다 timestamp와 단계 태그가 붙습니다. 예:
+
+- `[BACKUP]`
+- `[REMINDER]`
+- `[DELETE]`
+- `[ERROR]`
 
 즉시 1회 실행:
 

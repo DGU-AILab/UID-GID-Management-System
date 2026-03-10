@@ -1,5 +1,19 @@
 #!/bin/bash
 
+log_timestamp() {
+  date +"%Y-%m-%dT%H:%M:%S%z"
+}
+
+log_event() {
+  local tag="$1"
+  shift
+  printf '%s [%s] %s\n' "$(log_timestamp)" "$tag" "$*"
+}
+
+log_error() {
+  log_event "ERROR" "$*"
+}
+
 resolve_script_dir() {
   cd "$(dirname "${BASH_SOURCE[1]}")" && pwd
 }
@@ -133,9 +147,9 @@ require_command() {
   local install_hint="${2:-}"
 
   if ! command -v "$command_name" >/dev/null 2>&1; then
-    echo "Error: required command '$command_name' is not installed or not in PATH." >&2
+    log_error "required_command_missing command=${command_name}"
     if [ -n "$install_hint" ]; then
-      echo "Hint: $install_hint" >&2
+      log_error "hint=${install_hint}"
     fi
     return 1
   fi
@@ -239,10 +253,10 @@ backup_database_locally() {
   if mysqldump_exec >"$temp_file"; then
     gzip -c "$temp_file" >"$backup_file"
     rm -f "$temp_file"
-    echo "Database backup created successfully: $backup_file"
+    log_event "BACKUP" "database_backup_created domain=${domain_name} path=${backup_file}"
   else
     rm -f "$temp_file"
-    echo "Error: Database backup failed"
+    log_error "database_backup_failed domain=${domain_name}"
     return 1
   fi
 }
@@ -251,6 +265,6 @@ update_all_domain_exports() {
   if [ -f "${OPS_SCRIPT_DIR}/export_users_to_excel.py" ]; then
     python3 "${OPS_SCRIPT_DIR}/export_users_to_excel.py" --domains LAB,FARM
   else
-    echo "Warning: export_users_to_excel.py not found"
+    log_error "export_script_missing path=${OPS_SCRIPT_DIR}/export_users_to_excel.py"
   fi
 }

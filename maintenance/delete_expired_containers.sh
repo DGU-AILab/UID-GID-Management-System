@@ -74,7 +74,7 @@ for raw_domain in "${RAW_DOMAINS[@]}"; do
 done
 
 if [ ${#DOMAINS[@]} -eq 0 ]; then
-  echo "Error: no valid domains configured." >&2
+  log_error "expired_cleanup_invalid_domains"
   exit 1
 fi
 
@@ -100,18 +100,17 @@ mark_domain_updated() {
 }
 
 if [ "${dry_run}" = "true" ]; then
-  echo "[DRY-RUN] Checking expired active containers as of ${today_date}"
+  log_event "DELETE" "expired_cleanup_started mode=dry-run date=${today_date} domains=${domains_csv}"
 else
-  echo "Checking expired active containers as of ${today_date}"
+  log_event "DELETE" "expired_cleanup_started mode=apply date=${today_date} domains=${domains_csv}"
 fi
-echo
 
 for domain_name in "${DOMAINS[@]}"; do
   db_host="$(resolve_db_host_for_domain "$domain_name")" || exit 1
   create_mysql_client_config "$db_host"
 
   if ! mysql_exec -e "SELECT 1;" >/dev/null 2>&1; then
-    echo "[${domain_name}] Error: failed to connect to ${DB_NAME} on ${db_host}" >&2
+    log_error "expired_cleanup_db_connect_failed domain=${domain_name} database=${DB_NAME} host=${db_host} port=${DB_PORT}"
     exit 1
   fi
 
@@ -133,21 +132,19 @@ for domain_name in "${DOMAINS[@]}"; do
   cleanup_mysql_client_config
 
   if [ -z "${expired_rows}" ]; then
-    echo "[${domain_name}] No expired active containers."
-    echo
+    log_event "DELETE" "expired_containers_none domain=${domain_name}"
     continue
   fi
 
   domain_count=0
-  echo "[${domain_name}] Expired active containers:"
   while IFS=$'\t' read -r container_id container_name server_id expiring_date user_name ubuntu_username; do
     [ -z "${container_id}" ] && continue
     domain_count=$((domain_count + 1))
     total_found=$((total_found + 1))
-    echo "  ${domain_count}. ${container_name} | user=${ubuntu_username} (${user_name}) | server=${server_id} | expired=${expiring_date}"
+    log_event "DELETE" "expired_container_found domain=${domain_name} index=${domain_count} server=${server_id} container=${container_name} container_id=${container_id} username=${ubuntu_username} name=${user_name} expired=${expiring_date}"
 
     if [ "${apply_changes}" = "true" ]; then
-      echo "     -> deleting via script/delete_container_with_notification.sh"
+      log_event "DELETE" "expired_container_delete_invoked domain=${domain_name} server=${server_id} container=${container_name} container_id=${container_id}"
       bash "${DELETE_SCRIPT}" \
         --container-id "${container_id}" \
         --server-id "${server_id}" \
@@ -156,28 +153,24 @@ for domain_name in "${DOMAINS[@]}"; do
       mark_domain_updated "${domain_name}"
     fi
   done <<<"${expired_rows}"
-  echo
 done
 
 if [ "${apply_changes}" = "true" ] && [ "${total_deleted}" -gt 0 ]; then
-  echo "Running one-time post-actions after batch deletion..."
+  log_event "DELETE" "expired_cleanup_post_actions_started deleted=${total_deleted}"
   for domain_name in "${updated_domains[@]}"; do
-    echo "  Creating database backup for ${domain_name}..."
+    log_event "BACKUP" "expired_cleanup_backup_started domain=${domain_name}"
     db_host="$(resolve_db_host_for_domain "$domain_name")" || exit 1
     create_mysql_client_config "$db_host"
     backup_database_locally "${domain_name}" || true
     cleanup_mysql_client_config
   done
 
-  echo "  Refreshing LAB and FARM Excel/Google Sheets exports..."
+  log_event "DELETE" "expired_cleanup_export_started domains=LAB,FARM"
   update_all_domain_exports
 fi
 
-echo "Summary:"
-echo "  Expired active containers found: ${total_found}"
 if [ "${apply_changes}" = "true" ]; then
-  echo "  Deleted: ${total_deleted}"
+  log_event "DELETE" "expired_cleanup_completed mode=apply found=${total_found} deleted=${total_deleted}"
 else
-  echo "  Mode: dry-run"
-  echo "  Deleted: 0 (run with --apply to delete)"
+  log_event "DELETE" "expired_cleanup_completed mode=dry-run found=${total_found} deleted=0"
 fi

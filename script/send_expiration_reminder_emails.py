@@ -23,6 +23,11 @@ DEFAULT_FROM_NAME = "DGU AILab Server Manager"
 VALID_DOMAINS = ("LAB", "FARM")
 
 
+def log_event(tag: str, message: str, *, stream=None) -> None:
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    print(f"{timestamp} [{tag}] {message}", file=stream or sys.stdout)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="만료 예정 컨테이너 사용자에게 7/3/1일 전 이메일을 발송합니다."
@@ -226,7 +231,7 @@ def load_admin_cc_emails() -> List[str]:
                 continue
             normalized = normalize_email(line)
             if not normalized:
-                print(f"Warning: ignoring invalid admin CC email: {line}")
+                log_event("ERROR", f"invalid_admin_cc_email value={line}")
                 continue
             if normalized in seen:
                 continue
@@ -296,7 +301,7 @@ def fetch_pending_reminders(
         valid_rows.append(row)
 
     if invalid_email_rows:
-        print(f"[{domain_name}] Skipped {invalid_email_rows} row(s) with invalid email addresses.")
+        log_event("ERROR", f"invalid_recipient_rows_skipped domain={domain_name} count={invalid_email_rows}")
 
     return valid_rows
 
@@ -519,7 +524,7 @@ def main() -> int:
 
     try:
         if smtp_config.get("to_override") and smtp_config.get("cc_emails"):
-            print("[INFO] EMAIL_TO_OVERRIDE is set. Admin CC recipients are suppressed for test delivery.")
+            log_event("REMINDER", "email_override_enabled cc_suppressed=true")
 
         pending_rows: List[Dict[str, object]] = []
         for domain_name in domains:
@@ -531,9 +536,10 @@ def main() -> int:
 
             ensure_notification_log_table(cursor)
             domain_rows = fetch_pending_reminders(cursor, domain_name, today_value, reminder_days)
-            print(
-                f"[{domain_name}] Pending reminder rows: {len(domain_rows)} "
-                f"({db_config['host']}:{db_config['port']})"
+            log_event(
+                "REMINDER",
+                f"pending_rows domain={domain_name} count={len(domain_rows)} "
+                f"host={db_config['host']} port={db_config['port']}",
             )
             pending_rows.extend(domain_rows)
 
@@ -541,7 +547,7 @@ def main() -> int:
         pending_group_count = len(grouped_rows)
 
         if not grouped_rows:
-            print("No reminder emails to send.")
+            log_event("REMINDER", "no_pending_reminder_emails")
             for connection in connections.values():
                 connection.commit()
             return 0
@@ -555,16 +561,21 @@ def main() -> int:
                 rows=rows,
             )
 
-            print(
-                f"{'[DRY-RUN] ' if args.dry_run else ''}"
-                f"Prepared reminder for {effective_recipient}: "
-                f"{len(rows)} container(s), {days_left} day(s) left."
+            mode = "dry-run" if args.dry_run else "apply"
+            log_event(
+                "REMINDER",
+                f"reminder_prepared mode={mode} recipient={effective_recipient} "
+                f"containers={len(rows)} days_left={days_left}",
             )
 
             if args.dry_run:
                 continue
 
             send_email(message, smtp_config)
+            log_event(
+                "REMINDER",
+                f"reminder_sent recipient={effective_recipient} containers={len(rows)} days_left={days_left}",
+            )
             rows_by_domain: Dict[str, List[Dict[str, object]]] = defaultdict(list)
             for row in rows:
                 rows_by_domain[str(row["domain_name"])].append(row)
@@ -592,9 +603,9 @@ def main() -> int:
             connection.close()
 
     if args.dry_run:
-        print(f"[DRY-RUN] Pending reminder groups: {pending_group_count}")
+        log_event("REMINDER", f"reminder_completed mode=dry-run groups={pending_group_count}")
     else:
-        print(f"Sent {sent_email_count} reminder email(s).")
+        log_event("REMINDER", f"reminder_completed mode=apply sent={sent_email_count} groups={pending_group_count}")
     return 0
 
 
@@ -602,5 +613,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:  # pragma: no cover - CLI error path
-        print(f"Error: {exc}", file=sys.stderr)
+        log_event("ERROR", f"reminder_exception error={exc}", stream=sys.stderr)
         raise

@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import date
 from email.message import EmailMessage
 from email.utils import formataddr
 from pathlib import Path
 
-from email_utils import load_smtp_config, normalize_email, resolve_project_root, send_email
+from email_utils import load_smtp_config, log_event, normalize_email, resolve_project_root, send_email
 
 
 def parse_args() -> argparse.Namespace:
@@ -101,18 +102,30 @@ def main() -> int:
 
     effective_recipient = str(smtp_config.get("to_override") or normalized_recipient)
     if smtp_config.get("to_override") and smtp_config.get("cc_emails"):
-        print("[INFO] EMAIL_TO_OVERRIDE is set. Admin CC recipients are suppressed for test delivery.")
+        log_event("DELETE", "email_override_enabled cc_suppressed=true")
 
     message = build_message(args, smtp_config, effective_recipient)
 
     if args.dry_run:
-        print(f"[DRY-RUN] Prepared deletion notification for {effective_recipient}")
+        log_event(
+            "DELETE",
+            f"deletion_notification_prepared mode=dry-run recipient={effective_recipient} "
+            f"container={args.container_name} server={args.server_id}",
+        )
         return 0
 
     send_email(message, smtp_config)
-    print(f"Deletion notification sent to {effective_recipient}")
+    log_event(
+        "DELETE",
+        f"deletion_notification_sent recipient={effective_recipient} "
+        f"container={args.container_name} server={args.server_id}",
+    )
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        log_event("ERROR", f"deletion_notification_exception error={exc}", stream=sys.stderr)
+        raise

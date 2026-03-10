@@ -32,7 +32,7 @@ fi
 domains_arg=$(IFS=,; echo "${DOMAINS[*]}")
 failures=0
 
-echo "Running daily maintenance for domains: ${domains_arg}"
+log_event "BACKUP" "daily_maintenance_started domains=${domains_arg}"
 
 for domain_name in "${DOMAINS[@]}"; do
   db_host="$(resolve_db_host_for_domain "$domain_name")" || {
@@ -40,33 +40,39 @@ for domain_name in "${DOMAINS[@]}"; do
     continue
   }
 
-  echo "[${domain_name}] Preparing database backup from ${db_host}:${DB_PORT}"
+  log_event "BACKUP" "backup_started domain=${domain_name} host=${db_host} port=${DB_PORT}"
   create_mysql_client_config "$db_host"
 
   if ! mysql_exec -e "SELECT 1;" >/dev/null 2>&1; then
-    echo "[${domain_name}] Error: failed to connect to ${DB_NAME} on ${db_host}" >&2
+    log_error "backup_db_connect_failed domain=${domain_name} database=${DB_NAME} host=${db_host} port=${DB_PORT}"
     cleanup_mysql_client_config
     failures=$((failures + 1))
     continue
   fi
 
   if ! backup_database_locally "$domain_name"; then
-    echo "[${domain_name}] Error: backup failed" >&2
+    log_error "backup_failed domain=${domain_name}"
     failures=$((failures + 1))
   fi
 
   cleanup_mysql_client_config
 done
 
-echo "Running expiration reminder emails..."
+log_event "REMINDER" "reminder_run_started domains=${domains_arg}"
 if ! python3 "${SCRIPT_DIR}/send_expiration_reminder_emails.py" --domains "${domains_arg}"; then
-  echo "Error: reminder email run failed." >&2
+  log_error "reminder_run_failed domains=${domains_arg}"
+  failures=$((failures + 1))
+fi
+
+log_event "DELETE" "expired_cleanup_started domains=${domains_arg}"
+if ! bash "${PROJECT_ROOT}/maintenance/delete_expired_containers.sh" --domains "${domains_arg}" --apply; then
+  log_error "expired_cleanup_failed domains=${domains_arg}"
   failures=$((failures + 1))
 fi
 
 if [ "$failures" -gt 0 ]; then
-  echo "Daily maintenance finished with ${failures} failure(s)." >&2
+  log_error "daily_maintenance_finished failures=${failures}"
   exit 1
 fi
 
-echo "Daily maintenance completed successfully."
+log_event "BACKUP" "daily_maintenance_completed domains=${domains_arg} failures=0"
