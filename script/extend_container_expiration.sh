@@ -177,7 +177,7 @@ for domain_name in "${DOMAINS[@]}"; do
       dc.id,
       dc.container_name,
       dc.server_id,
-      DATE_FORMAT(dc.expiring_at, '%%Y-%%m-%%d'),
+      DATE_FORMAT(dc.expiring_at, '%Y-%m-%d'),
       u.name,
       u.ubuntu_username,
       IFNULL(GROUP_CONCAT(up.port_number ORDER BY up.port_number SEPARATOR ', '), '')

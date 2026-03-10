@@ -120,7 +120,7 @@ for domain_name in "${DOMAINS[@]}"; do
       dc.container_id,
       dc.container_name,
       dc.server_id,
-      DATE_FORMAT(dc.expiring_at, '%%Y-%%m-%%d'),
+      DATE_FORMAT(dc.expiring_at, '%Y-%m-%d'),
       u.name,
       u.ubuntu_username
     FROM docker_container dc
