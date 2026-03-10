@@ -1,0 +1,5 @@
+# Copy this file to reminder_admins.local.txt.
+# One email address per line. These recipients are added as CC on reminder emails.
+
+admin1@example.com
+admin2@example.com

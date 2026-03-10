@@ -2,8 +2,10 @@
 config/db_config.env
 config/*.local.env
 config/*.local.json
+config/*.local.txt
 config/email_config.local.env
 !config/*.example.json
+!config/*.example.txt
 
 # Excel exports
 excel_exports/

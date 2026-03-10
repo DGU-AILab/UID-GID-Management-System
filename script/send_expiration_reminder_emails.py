@@ -81,6 +81,12 @@ def resolve_db_config_path() -> Path:
     )
 
 
+def resolve_admin_cc_path() -> Path:
+    script_dir = Path(__file__).resolve().parent
+    project_root = script_dir.parent
+    return project_root / "config" / "reminder_admins.local.txt"
+
+
 def load_raw_db_config() -> Dict[str, str]:
     return load_env_file(resolve_db_config_path())
 
@@ -149,6 +155,7 @@ def load_smtp_config() -> Dict[str, object]:
         "timeout": int(get_value("SMTP_TIMEOUT", "30")),
         "support_manual_url": get_value("SUPPORT_MANUAL_URL"),
         "error_report_form_url": get_value("ERROR_REPORT_FORM_URL"),
+        "cc_emails": load_admin_cc_emails(),
     }
 
 
@@ -203,6 +210,29 @@ def normalize_email(value: str | None) -> str | None:
     if "@" not in parsed:
         return None
     return parsed
+
+
+def load_admin_cc_emails() -> List[str]:
+    path = resolve_admin_cc_path()
+    if not path.exists():
+        return []
+
+    emails: List[str] = []
+    seen = set()
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            normalized = normalize_email(line)
+            if not normalized:
+                print(f"Warning: ignoring invalid admin CC email: {line}")
+                continue
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            emails.append(normalized)
+    return emails
 
 
 def fetch_pending_reminders(
@@ -412,6 +442,9 @@ def build_email_message(
     message["Subject"] = f"[DGU AILab] 서버 사용 완료 예정일 {reminder_days}일 전 안내 ({subject_date})"
     message["From"] = formataddr((str(smtp_config["from_name"]), str(smtp_config["from_email"])))
     message["To"] = recipient_email
+    cc_emails = list(smtp_config.get("cc_emails") or [])
+    if cc_emails and not smtp_config.get("to_override"):
+        message["Cc"] = ", ".join(cc_emails)
     if smtp_config.get("reply_to"):
         message["Reply-To"] = str(smtp_config["reply_to"])
     message.set_content("\n".join(lines))
@@ -485,6 +518,9 @@ def main() -> int:
     pending_group_count = 0
 
     try:
+        if smtp_config.get("to_override") and smtp_config.get("cc_emails"):
+            print("[INFO] EMAIL_TO_OVERRIDE is set. Admin CC recipients are suppressed for test delivery.")
+
         pending_rows: List[Dict[str, object]] = []
         for domain_name in domains:
             db_config = build_db_config(raw_db_config, domain_name)

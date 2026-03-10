@@ -103,6 +103,14 @@ cp config/db_config.example.env config/db_config.local.env
 cp config/email_config.example.env config/email_config.local.env
 ```
 
+관리자 CC 목록을 분리해서 관리하려면:
+
+```bash
+cp config/reminder_admins.example.txt config/reminder_admins.local.txt
+```
+
+`config/reminder_admins.local.txt` 에 한 줄에 한 이메일 주소씩 넣으면 만료 안내 메일의 참조(CC)로 추가됩니다.
+
 필수 항목:
 
 - `SMTP_FROM`
@@ -256,7 +264,9 @@ python3 script/send_expiration_reminder_emails.py \
 - 기본 대상은 `7`, `3`, `1`일 남은 활성 컨테이너입니다.
 - 같은 수신자 + 같은 남은 일수는 메일 1통으로 묶습니다.
 - 같은 사람의 컨테이너가 여러 개면 사람 정보는 한 번만 쓰고, 아래에 컨테이너 목록을 여러 개 출력합니다.
+- `config/reminder_admins.local.txt` 가 있으면 관리자 이메일을 참조(CC)에 추가합니다.
 - `EMAIL_TO_OVERRIDE` 를 설정하면 실제 테스트 발송을 특정 메일 한 곳으로 우회할 수 있습니다.
+- `EMAIL_TO_OVERRIDE` 테스트 모드에서는 관리자 CC를 보내지 않습니다.
 
 ## Dry-run 테스트
 
