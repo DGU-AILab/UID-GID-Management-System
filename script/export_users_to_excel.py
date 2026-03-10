@@ -112,7 +112,7 @@ def get_user_data(db_config, existing_only=True):
             dc.created_by AS '컨테이너 생성자',
             DATE_FORMAT(dc.created_at, '%%Y-%%m-%%d') AS '컨테이너 생성일자',
             CONCAT(dc.image, ':', dc.image_version) AS 'docker image version',
-            dc.container_name AS '컨테이너 명',
+            CONCAT(dc.container_id, ' | ', dc.container_name) AS '컨테이너 명',
             COALESCE(u.email, '') AS 'E-mail',
             COALESCE(u.phone, '') AS '전화번호',
             '' AS '사용여부',

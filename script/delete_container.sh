@@ -8,6 +8,9 @@ trap cleanup_mysql_client_config EXIT
 
 container_id=""
 container_name=""
+filter_name=""
+filter_username=""
+filter_port=""
 force=false
 domain_name=""
 server_number=""
@@ -23,6 +26,9 @@ function show_help {
   echo "  -h, --help                      Show this help message"
   echo "  -i, --container-id ID           Docker container ID"
   echo "  -n, --container-name NAME       Docker container name"
+  echo "      --name NAME                 User's actual name filter"
+  echo "      --username USERNAME         Ubuntu username filter"
+  echo "      --port PORT                 Port number filter"
   echo "      --domain DOMAIN             Domain name (LAB or FARM)"
   echo "      --server-number NUMBER      Server number (e.g., 1, 10)"
   echo "  -s, --server-id SERVER_ID       Server ID (legacy option, e.g., LAB1, FARM3)"
@@ -43,6 +49,18 @@ while [[ $# -gt 0 ]]; do
     ;;
   -n | --container-name)
     container_name="$2"
+    shift 2
+    ;;
+  --name)
+    filter_name="$2"
+    shift 2
+    ;;
+  --username)
+    filter_username="$2"
+    shift 2
+    ;;
+  --port)
+    filter_port="$2"
     shift 2
     ;;
   --domain)
@@ -76,13 +94,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [ -z "$container_id" ] && [ -z "$container_name" ]; then
-  read -p "Enter container ID or name: " container_input
-  if [[ $container_input =~ ^[0-9a-f]{12}$ ]] || [[ $container_input =~ ^[0-9a-f]{64}$ ]]; then
-    container_id=$container_input
-  else
-    container_name=$container_input
-  fi
+sql_escape() {
+  printf "%s" "$1" | sed "s/'/''/g"
+}
+
+if [ -n "$filter_port" ] && ! [[ "$filter_port" =~ ^[0-9]+$ ]]; then
+  echo "Error: --port must be numeric."
+  exit 1
+fi
+
+if [ -z "$container_id" ] && [ -z "$container_name" ] && [ -z "$filter_name" ] && [ -z "$filter_username" ] && [ -z "$filter_port" ]; then
+  echo "Error: provide --container-id, --container-name, or at least one of --name/--username/--port."
+  exit 1
 fi
 
 if [ -z "$server_id_input" ]; then
@@ -125,6 +148,66 @@ elif [ -n "$container_name" ]; then
     SELECT id, container_id, container_name, server_id
     FROM docker_container
     WHERE container_name = '$container_name' AND existing = 1;")
+else
+  name_sql=""
+  username_sql=""
+  port_sql=""
+
+  if [ -n "$filter_name" ]; then
+    name_sql=" AND u.name = '$(sql_escape "$filter_name")'"
+  fi
+
+  if [ -n "$filter_username" ]; then
+    username_sql=" AND u.ubuntu_username = '$(sql_escape "$filter_username")'"
+  fi
+
+  if [ -n "$filter_port" ]; then
+    port_sql=" AND EXISTS (
+      SELECT 1
+      FROM used_ports up_filter
+      WHERE up_filter.docker_container_record_id = dc.id
+        AND up_filter.port_number = ${filter_port}
+    )"
+  fi
+
+  matched_rows=$(mysql_exec --batch --raw -N -e "
+    SELECT
+      dc.id,
+      dc.container_id,
+      dc.container_name,
+      dc.server_id,
+      u.name,
+      u.ubuntu_username,
+      IFNULL(GROUP_CONCAT(up.port_number ORDER BY up.port_number SEPARATOR ', '), '')
+    FROM docker_container dc
+    JOIN user u ON u.id = dc.user_id
+    LEFT JOIN used_ports up ON up.docker_container_record_id = dc.id
+    WHERE dc.existing = 1
+      AND dc.server_id = '$(sql_escape "$server_id")'
+      ${name_sql}
+      ${username_sql}
+      ${port_sql}
+    GROUP BY dc.id, dc.container_id, dc.container_name, dc.server_id, u.name, u.ubuntu_username
+    ORDER BY dc.container_name ASC;
+  ")
+
+  match_count=$(printf '%s\n' "$matched_rows" | awk 'NF{count++} END{print count+0}')
+
+  if [ "$match_count" -eq 0 ]; then
+    echo "Container not found in database or already marked as deleted."
+    exit 1
+  fi
+
+  if [ "$match_count" -gt 1 ]; then
+    echo "Error: multiple containers matched the given filters on ${server_id}. Narrow the filters."
+    printf '%s\n' "$matched_rows" | while IFS=$'\t' read -r row_id row_container_id row_container_name row_server_id row_name row_username row_ports; do
+      [ -z "$row_id" ] && continue
+      echo "  - ${row_container_name} (${row_container_id}) | user=${row_username} (${row_name}) | server=${row_server_id} | ports=${row_ports:-none}"
+    done
+    exit 1
+  fi
+
+  db_container=$(printf '%s\n' "$matched_rows" | head -n 1 | awk -F'\t' '{print $1, $2, $3, $4}')
 fi
 
 if [ -z "$db_container" ]; then
