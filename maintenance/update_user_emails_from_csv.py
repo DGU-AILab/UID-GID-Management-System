@@ -37,7 +37,27 @@ def resolve_db_config_path():
     )
 
 
-def load_db_config():
+def normalize_domain(domain_name):
+    normalized = domain_name.strip().upper()
+    if normalized not in {"LAB", "FARM"}:
+        raise ValueError(f"Unsupported domain: {domain_name}")
+    return normalized
+
+
+def resolve_db_host(config, domain_name=None):
+    if domain_name:
+        specific_key = f"{domain_name}_DB_HOST"
+        if config.get(specific_key):
+            return config[specific_key]
+        raise ValueError(f"{specific_key} must be configured when --domain is used.")
+
+    if config.get("DB_HOST"):
+        return config["DB_HOST"]
+
+    raise ValueError("DB_HOST must be configured when --domain is not provided.")
+
+
+def load_db_config(domain_name=None):
     """DB 설정 파일에서 데이터베이스 설정을 읽어옵니다."""
     config = {}
     config_file = resolve_db_config_path()
@@ -50,7 +70,7 @@ def load_db_config():
                 config[key.strip()] = value.strip()
 
     return {
-        "host": config["DB_HOST"],
+        "host": resolve_db_host(config, domain_name),
         "port": int(config["DB_PORT"]),
         "user": config["DB_USER"],
         "password": config["DB_PASSWORD"],
@@ -188,6 +208,11 @@ def main():
         action="store_true",
         help="DB를 실제로 변경하지 않고 반영 예정 내용만 출력",
     )
+    parser.add_argument(
+        "--domain",
+        choices=("LAB", "FARM", "lab", "farm"),
+        help="대상 도메인 DB 선택. 지정하면 LAB_DB_HOST 또는 FARM_DB_HOST를 사용",
+    )
 
     args = parser.parse_args()
 
@@ -198,7 +223,10 @@ def main():
             print(f"  - {name}: {', '.join(emails)}", file=sys.stderr)
         sys.exit(1)
 
-    db_config = load_db_config()
+    domain_name = normalize_domain(args.domain) if args.domain else None
+    db_config = load_db_config(domain_name)
+    if domain_name:
+        print(f"Target domain: {domain_name} ({db_config['host']}:{db_config['port']})")
     apply_updates(db_config, updates, dry_run=args.dry_run)
 
 

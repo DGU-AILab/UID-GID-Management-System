@@ -327,6 +327,15 @@ bash maintenance/delete_expired_containers.sh --dry-run
 bash maintenance/delete_expired_containers.sh --apply
 ```
 
+이메일 CSV 업데이트를 도메인별 DB에 적용하려면:
+
+```bash
+python3 maintenance/update_user_emails_from_csv.py \
+  --domain FARM \
+  --csv excel_exports/farm_user_emails.csv \
+  --dry-run
+```
+
 ## 자동화 권장안
 
 잡이 많아질 예정이면 raw cron보다 `systemd timer` 로 통일하는 것이 낫습니다.
