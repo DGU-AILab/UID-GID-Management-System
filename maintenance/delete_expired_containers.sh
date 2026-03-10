@@ -78,7 +78,7 @@ if [ ${#DOMAINS[@]} -eq 0 ]; then
   exit 1
 fi
 
-DELETE_SCRIPT="${PROJECT_ROOT}/script/delete_container.sh"
+DELETE_SCRIPT="${PROJECT_ROOT}/script/delete_container_with_notification.sh"
 if [ ! -x "${DELETE_SCRIPT}" ]; then
   echo "Error: delete script not found or not executable: ${DELETE_SCRIPT}" >&2
   exit 1
@@ -147,7 +147,7 @@ for domain_name in "${DOMAINS[@]}"; do
     echo "  ${domain_count}. ${container_name} | user=${ubuntu_username} (${user_name}) | server=${server_id} | expired=${expiring_date}"
 
     if [ "${apply_changes}" = "true" ]; then
-      echo "     -> deleting via script/delete_container.sh"
+      echo "     -> deleting via script/delete_container_with_notification.sh"
       bash "${DELETE_SCRIPT}" \
         --container-id "${container_id}" \
         --server-id "${server_id}" \

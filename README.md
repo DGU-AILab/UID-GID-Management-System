@@ -26,8 +26,10 @@ script/
   common_domain_db.sh
   create_container.sh
   delete_container.sh
+  delete_container_with_notification.sh
   extend_container_expiration.sh
   export_users_to_excel.py
+  send_container_deleted_email.py
   send_expiration_reminder_emails.py
 
 maintenance/
@@ -172,13 +174,14 @@ bash script/create_container.sh \
 실제 실행:
 
 ```bash
-bash script/delete_container.sh \
+bash script/delete_container_with_notification.sh \
   --server-id LAB10 \
   --container-name hong_by_jy
 ```
 
 - DB에서는 `docker_container.existing = 0` 으로 soft delete 처리합니다.
 - 포트는 `used_ports` 에서 제거됩니다.
+- 삭제가 성공하면 사용자에게 삭제 안내 메일을 발송합니다.
 
 ### 3. 엑셀 / Google Sheets 추출
 
@@ -320,6 +323,8 @@ bash script_test/extend_container_expiration.sh \
 - `migrate_add_user_contact_columns.sh`
 - `sync_containers.sh`
 - `update_user_emails_from_csv.py`
+
+`maintenance/delete_expired_containers.sh --apply` 는 내부적으로 `script/delete_container_with_notification.sh` 를 호출하므로, 실제 삭제 시 사용자 삭제 안내 메일도 함께 발송합니다.
 
 특히 `maintenance/sync_containers.sh` 는 현재 관리 서버 구조로 재설계된 상태가 아니므로, 운영 메인 플로우와 별개로 취급하는 것이 안전합니다.
 
