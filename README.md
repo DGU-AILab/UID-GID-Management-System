@@ -26,10 +26,12 @@ script/
   common_domain_db.sh
   create_container.sh
   delete_container.sh
+  extend_container_expiration.sh
   export_users_to_excel.py
   send_expiration_reminder_emails.py
 
 maintenance/
+  delete_expired_containers.sh
   delete_user.py
   migrate_add_user_contact_columns.sh
   sync_containers.sh
@@ -38,6 +40,7 @@ maintenance/
 script_test/
   create_container.sh           # 운영 create의 dry-run wrapper
   delete_container.sh           # 운영 delete의 dry-run wrapper
+  extend_container_expiration.sh
 ```
 
 ## 운영 전제
@@ -189,7 +192,42 @@ python3 script/export_users_to_excel.py --domains LAB,FARM
 - 이 스크립트는 현재 dry-run 옵션이 없습니다.
 - 실행 시 실제 `.xlsx` 파일을 만들고, 인증 JSON이 있으면 Google Sheets도 갱신합니다.
 
-### 4. 만료 안내 메일 발송
+### 4. 만료일 연장
+
+dry-run:
+
+```bash
+bash script/extend_container_expiration.sh \
+  --username hong \
+  --expiration-date 2026-04-30 \
+  --dry-run
+```
+
+실제 반영:
+
+```bash
+bash script/extend_container_expiration.sh \
+  --username hong \
+  --expiration-date 2026-04-30 \
+  --apply
+```
+
+포트로 특정 컨테이너를 찾을 수도 있습니다.
+
+```bash
+bash script/extend_container_expiration.sh \
+  --port 9050 \
+  --expiration-date 2026-04-30 \
+  --apply
+```
+
+주의:
+
+- 필터는 `--name`, `--username`, `--port` 중 하나 이상 필요합니다.
+- 여러 컨테이너가 매칭되면 기본적으로 dry-run으로만 보여주고, 실제 반영은 `--all-matches` 가 있어야 합니다.
+- 반영 후에는 도메인별 DB 백업과 LAB/FARM export 갱신을 한 번 수행합니다.
+
+### 5. 만료 안내 메일 발송
 
 dry-run:
 
@@ -249,9 +287,17 @@ bash script_test/delete_container.sh \
   --container-name hong_by_jy
 ```
 
+### 만료일 연장 dry-run
+
+```bash
+bash script_test/extend_container_expiration.sh \
+  --username hong \
+  --expiration-date 2026-04-30
+```
+
 주의:
 
-- create/delete dry-run도 DB 읽기는 필요합니다.
+- create/delete/extend dry-run도 DB 읽기는 필요합니다.
 - 따라서 관리 서버에는 최소한 `mysql` 클라이언트가 설치되어 있어야 합니다.
 - 원격 Docker 변경, DB 쓰기, 백업, export는 하지 않습니다.
 
@@ -260,11 +306,26 @@ bash script_test/delete_container.sh \
 `maintenance/` 아래 스크립트는 정기 운영보다는 데이터 보정/정리/마이그레이션에 가깝습니다.
 
 - `delete_user.py`
+- `delete_expired_containers.sh`
 - `migrate_add_user_contact_columns.sh`
 - `sync_containers.sh`
 - `update_user_emails_from_csv.py`
 
 특히 `maintenance/sync_containers.sh` 는 현재 관리 서버 구조로 재설계된 상태가 아니므로, 운영 메인 플로우와 별개로 취급하는 것이 안전합니다.
+
+만료된 활성 컨테이너를 조회하거나 일괄 삭제하려면:
+
+```bash
+bash maintenance/delete_expired_containers.sh --dry-run
+```
+
+옵션 없이 실행해도 동일하게 dry-run 조회만 수행합니다.
+
+실제 삭제까지 하려면:
+
+```bash
+bash maintenance/delete_expired_containers.sh --apply
+```
 
 ## 자동화 권장안
 

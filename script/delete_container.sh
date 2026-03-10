@@ -15,6 +15,7 @@ server_id_input=""
 server_id=""
 expected_target_host=""
 dry_run=false
+skip_post_actions=false
 
 function show_help {
   echo "Usage: $0 [options]"
@@ -27,6 +28,7 @@ function show_help {
   echo "  -s, --server-id SERVER_ID       Server ID (legacy option, e.g., LAB1, FARM3)"
   echo "  -f, --force                     Force deletion even if database update fails"
   echo "      --dry-run                   Show planned actions without changing remote hosts or DB"
+  echo "      --skip-post-actions         Skip backup/export after deletion"
   exit 0
 }
 
@@ -61,6 +63,10 @@ while [[ $# -gt 0 ]]; do
     ;;
   --dry-run)
     dry_run=true
+    shift
+    ;;
+  --skip-post-actions)
+    skip_post_actions=true
     shift
     ;;
   *)
@@ -148,8 +154,12 @@ if [ "$dry_run" = "true" ]; then
   echo "[DRY-RUN] Would delete used_ports rows for docker_container.id=${db_container_id}"
   echo "[DRY-RUN] Would mark docker_container.existing=0 and set deleted_at=NOW()"
   echo "[DRY-RUN] Would remove remote Docker container from ${actual_target_host}"
-  echo "[DRY-RUN] Would create local DB backup for ${domain_name}"
-  echo "[DRY-RUN] Would refresh LAB and FARM Excel/Google Sheets exports"
+  if [ "${skip_post_actions}" = "true" ]; then
+    echo "[DRY-RUN] Post-actions skipped: no DB backup or export refresh"
+  else
+    echo "[DRY-RUN] Would create local DB backup for ${domain_name}"
+    echo "[DRY-RUN] Would refresh LAB and FARM Excel/Google Sheets exports"
+  fi
   exit 0
 fi
 
@@ -192,8 +202,12 @@ mysql_exec -e "COMMIT;"
 
 echo "Container deletion completed successfully."
 
-echo "Creating database backup..."
-backup_database_locally "$domain_name" || true
+if [ "${skip_post_actions}" = "true" ]; then
+  echo "Skipping backup and export refresh (--skip-post-actions)."
+else
+  echo "Creating database backup..."
+  backup_database_locally "$domain_name" || true
 
-echo "Updating Google Sheets and Excel export for LAB and FARM..."
-update_all_domain_exports
+  echo "Updating Google Sheets and Excel export for LAB and FARM..."
+  update_all_domain_exports
+fi
