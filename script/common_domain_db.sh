@@ -46,6 +46,44 @@ load_management_config() {
   BACKUP_ROOT_DIR=${BACKUP_ROOT_DIR:-"${PROJECT_ROOT}/mysql_backups"}
 }
 
+load_daily_maintenance_config() {
+  local config_file="${PROJECT_ROOT}/config/daily_maintenance.local.env"
+
+  if [ ! -f "${config_file}" ]; then
+    return 0
+  fi
+
+  set -a
+  # shellcheck disable=SC1090
+  source "${config_file}"
+  set +a
+}
+
+redirect_logs_to_file_if_configured() {
+  local log_file="${1:-${UID_GID_LOG_FILE:-${DAILY_MAINTENANCE_LOG_FILE:-}}}"
+  local log_dir
+
+  if [ -z "${log_file}" ] || [ "${UID_GID_LOG_REDIRECTED:-false}" = "true" ]; then
+    return 0
+  fi
+
+  log_dir="$(dirname "${log_file}")"
+
+  if ! mkdir -p "${log_dir}" 2>/dev/null; then
+    log_error "log_directory_unavailable path=${log_dir}"
+    return 1
+  fi
+
+  if ! touch "${log_file}" 2>/dev/null; then
+    log_error "log_file_unavailable path=${log_file}"
+    return 1
+  fi
+
+  export UID_GID_LOG_REDIRECTED=true
+  export UID_GID_LOG_FILE="${log_file}"
+  exec >>"${log_file}" 2>&1
+}
+
 normalize_domain_name() {
   local raw_domain="$1"
   local normalized

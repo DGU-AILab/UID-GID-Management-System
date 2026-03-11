@@ -7,6 +7,8 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 source "${SCRIPT_DIR}/common_domain_db.sh"
 load_management_config
+load_daily_maintenance_config
+redirect_logs_to_file_if_configured || true
 
 trap cleanup_mysql_client_config EXIT
 

@@ -5,6 +5,8 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${PROJECT_ROOT}/script/common_domain_db.sh"
 load_management_config
+load_daily_maintenance_config
+redirect_logs_to_file_if_configured || true
 
 trap cleanup_mysql_client_config EXIT
 
@@ -86,6 +88,7 @@ fi
 
 total_found=0
 total_deleted=0
+total_failed=0
 updated_domains=()
 
 mark_domain_updated() {
@@ -145,12 +148,17 @@ for domain_name in "${DOMAINS[@]}"; do
 
     if [ "${apply_changes}" = "true" ]; then
       log_event "DELETE" "expired_container_delete_invoked domain=${domain_name} server=${server_id} container=${container_name} container_id=${container_id}"
-      bash "${DELETE_SCRIPT}" \
+      if bash "${DELETE_SCRIPT}" \
         --container-id "${container_id}" \
         --server-id "${server_id}" \
-        --skip-post-actions
-      total_deleted=$((total_deleted + 1))
-      mark_domain_updated "${domain_name}"
+        --skip-post-actions; then
+        total_deleted=$((total_deleted + 1))
+        mark_domain_updated "${domain_name}"
+        log_event "DELETE" "expired_container_delete_succeeded domain=${domain_name} server=${server_id} container=${container_name} container_id=${container_id}"
+      else
+        total_failed=$((total_failed + 1))
+        log_error "expired_container_delete_failed domain=${domain_name} server=${server_id} container=${container_name} container_id=${container_id}"
+      fi
     fi
   done <<<"${expired_rows}"
 done
@@ -170,7 +178,11 @@ if [ "${apply_changes}" = "true" ] && [ "${total_deleted}" -gt 0 ]; then
 fi
 
 if [ "${apply_changes}" = "true" ]; then
-  log_event "DELETE" "expired_cleanup_completed mode=apply found=${total_found} deleted=${total_deleted}"
+  if [ "${total_failed}" -gt 0 ]; then
+    log_error "expired_cleanup_completed mode=apply found=${total_found} deleted=${total_deleted} failed=${total_failed}"
+    exit 1
+  fi
+  log_event "DELETE" "expired_cleanup_completed mode=apply found=${total_found} deleted=${total_deleted} failed=0"
 else
   log_event "DELETE" "expired_cleanup_completed mode=dry-run found=${total_found} deleted=0"
 fi
