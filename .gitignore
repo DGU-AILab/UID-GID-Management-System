@@ -12,6 +12,7 @@ excel_exports/
 
 # Logs
 *.log
+*.log.*
 
 # Python cache
 __pycache__/
