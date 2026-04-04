@@ -153,13 +153,13 @@ ansible all -m setup --tree server_info/
 그 다음 저장소의 정적 토폴로지 규칙과 합쳐 `servers.jsonl`을 생성합니다.
 
 ```bash
-python3 script/generate_servers_jsonl.py \
-  --inventory /etc/ansible/inventory.ini \
-  --output server_inventory/servers.jsonl
+python3 server_info/generate_servers_jsonl.py \
+  --inventory /etc/ansible/inventory.ini
 ```
 
 - 정적 네트워크/포트 규칙은 `config/network_topology.json` 에서 관리합니다.
 - inventory 경로를 주지 않으면 `ANSIBLE_INVENTORY` 환경변수를 먼저 보고, 없으면 facts와 포트 규칙만으로 보완합니다.
+- 기본 출력은 `server_info/servers.jsonl` 입니다.
 - 출력은 호스트당 한 줄 JSON(`jsonl`)이며, management/storage NIC, MAC, 공인 접근 포트, 서버 번호별 서비스 포트 블록을 포함합니다.
 
 ## 주요 명령

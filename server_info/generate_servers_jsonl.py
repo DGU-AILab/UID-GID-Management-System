@@ -10,6 +10,11 @@ import sys
 from pathlib import Path
 
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_FACTS_DIR = REPO_ROOT / "server_info"
+DEFAULT_TOPOLOGY_PATH = REPO_ROOT / "config" / "network_topology.json"
+DEFAULT_OUTPUT_PATH = REPO_ROOT / "server_info" / "servers.jsonl"
+
 HOST_RE = re.compile(r"^(lab|farm)(\d+)$", re.IGNORECASE)
 VIRTUAL_PREFIXES = (
     "br-",
@@ -34,12 +39,12 @@ def parse_args():
     )
     parser.add_argument(
         "--facts-dir",
-        default="server_info",
+        default=str(DEFAULT_FACTS_DIR),
         help="Directory created by `ansible all -m setup --tree ...`",
     )
     parser.add_argument(
         "--topology",
-        default="config/network_topology.json",
+        default=str(DEFAULT_TOPOLOGY_PATH),
         help="Static topology and public access rules JSON file",
     )
     parser.add_argument(
@@ -49,7 +54,7 @@ def parse_args():
     )
     parser.add_argument(
         "--output",
-        default="server_inventory/servers.jsonl",
+        default=str(DEFAULT_OUTPUT_PATH),
         help="Output JSONL path",
     )
     return parser.parse_args()
