@@ -1,0 +1,54 @@
+{
+  "management_desktop": {
+    "public_ip": "210.94.179.18",
+    "ssh_port": 8080,
+    "ssh_endpoint": "210.94.179.18:8080",
+    "description": "Management desktop"
+  },
+  "domains": {
+    "LAB": {
+      "ansible_user": "jy",
+      "public_ip": "210.94.179.18",
+      "management_network": {
+        "subnet": "192.168.1.0/24",
+        "switch": "shared-physical-switch",
+        "vlan": "LAB",
+        "topology_note": "LAB and FARM management networks share the same physical switch and are separated by VLAN."
+      },
+      "storage_network": {
+        "subnet": "100.100.100.0/24",
+        "switch": "separate-physical-switch",
+        "topology_note": "Storage traffic uses a dedicated physical switch."
+      },
+      "ssh_port_rule": {
+        "base_port": 8080
+      },
+      "service_port_rule": {
+        "base_start": 9000,
+        "block_size": 100
+      }
+    },
+    "FARM": {
+      "ansible_user": "jy",
+      "public_ip": "210.94.179.19",
+      "management_network": {
+        "subnet": "192.168.2.0/24",
+        "switch": "shared-physical-switch",
+        "vlan": "FARM",
+        "topology_note": "LAB and FARM management networks share the same physical switch and are separated by VLAN."
+      },
+      "storage_network": {
+        "subnet": "100.100.100.0/24",
+        "switch": "separate-physical-switch",
+        "topology_note": "Storage traffic uses a dedicated physical switch."
+      },
+      "ssh_port_rule": {
+        "base_port": 8080
+      },
+      "service_port_rule": {
+        "base_start": 9000,
+        "block_size": 100
+      }
+    }
+  }
+}

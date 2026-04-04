@@ -142,6 +142,26 @@ cp config/google-client.example.json \
 
 그 다음 실제 서비스 계정 값으로 내용을 채워야 합니다.
 
+### 서버 인벤토리 JSONL 생성
+
+Ansible facts를 AI가 읽기 쉬운 요약 인벤토리로 만들려면 먼저 원본 facts를 갱신합니다.
+
+```bash
+ansible all -m setup --tree server_info/
+```
+
+그 다음 저장소의 정적 토폴로지 규칙과 합쳐 `servers.jsonl`을 생성합니다.
+
+```bash
+python3 script/generate_servers_jsonl.py \
+  --inventory /etc/ansible/inventory.ini \
+  --output server_inventory/servers.jsonl
+```
+
+- 정적 네트워크/포트 규칙은 `config/network_topology.json` 에서 관리합니다.
+- inventory 경로를 주지 않으면 `ANSIBLE_INVENTORY` 환경변수를 먼저 보고, 없으면 facts와 포트 규칙만으로 보완합니다.
+- 출력은 호스트당 한 줄 JSON(`jsonl`)이며, management/storage NIC, MAC, 공인 접근 포트, 서버 번호별 서비스 포트 블록을 포함합니다.
+
 ## 주요 명령
 
 ### 1. 컨테이너 생성
