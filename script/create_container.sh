@@ -17,6 +17,7 @@ container_image=""
 container_version=""
 container_name=""
 container_ports=""
+enable_vnc=false
 created_by=""
 email=""
 phone=""
@@ -42,6 +43,8 @@ function show_help {
   echo "      --no-container-name         Skip container name (use default naming)"
   echo "  -p, --container-ports PORTS     Additional container ports (comma-separated)"
   echo "      --no-additional-ports       Skip additional port mappings"
+  echo "      --enable-vnc true|false     Enable noVNC GUI access and map container port 6080"
+  echo "      --enable_vnc true|false     Alias for --enable-vnc"
   echo "  -c, --created-by CREATOR        Username of server manager"
   echo "      --email EMAIL               User email (required)"
   echo "      --phone PHONE               User phone (required)"
@@ -113,6 +116,21 @@ while [[ $# -gt 0 ]]; do
     no_additional_ports_flag="true"
     container_ports=""
     shift
+    ;;
+  --enable-vnc | --enable_vnc)
+    case "$2" in
+      true | TRUE | 1 | yes | YES | on | ON)
+        enable_vnc=true
+        ;;
+      false | FALSE | 0 | no | NO | off | OFF)
+        enable_vnc=false
+        ;;
+      *)
+        echo "Error: $1 must be true or false"
+        exit 1
+        ;;
+    esac
+    shift 2
     ;;
   -c | --created-by)
     created_by="$2"
@@ -225,6 +243,28 @@ if [ -z "$note" ]; then
   read -p "Note: " note
 fi
 
+if [ "$enable_vnc" = "true" ]; then
+  vnc_port_present=false
+  if [ -n "$container_ports" ]; then
+    IFS=',' read -ra EXISTING_CONTAINER_PORT_LIST <<<"$container_ports"
+    for existing_container_port in "${EXISTING_CONTAINER_PORT_LIST[@]}"; do
+      existing_container_port="$(echo "$existing_container_port" | xargs)"
+      if [ "$existing_container_port" = "6080" ]; then
+        vnc_port_present=true
+        break
+      fi
+    done
+  fi
+
+  if [ "$vnc_port_present" = "false" ]; then
+    if [ -n "$container_ports" ]; then
+      container_ports="${container_ports},6080"
+    else
+      container_ports="6080"
+    fi
+  fi
+fi
+
 echo ""
 echo ""
 echo "Information entered:"
@@ -241,6 +281,7 @@ echo "  Container Image: $container_image"
 echo "  Container Version: $container_version"
 echo "  Container Name: $container_name"
 echo "  Container Ports: $container_ports"
+echo "  Enable VNC: $enable_vnc"
 echo "  Created By: $created_by"
 echo "  Email: $email"
 echo "  Phone: $phone"
@@ -362,6 +403,9 @@ if [ "$dry_run" = "true" ]; then
       echo "  - ${mapping}"
     done
   fi
+  if [ "$enable_vnc" = "true" ]; then
+    echo "[DRY-RUN] VNC/noVNC will be enabled with ENABLE_VNC=true"
+  fi
   if [ -n "$user_info" ]; then
     echo "[DRY-RUN] Existing user will be updated: ${username} (UID=${available_uid}, GID=${available_gid})"
   else
@@ -386,7 +430,12 @@ fi
 
 mysql_exec -e "START TRANSACTION;" || exit 1
 
-remote_run_command="docker run -dit --gpus device=all --memory=192g --memory-swap=192g ${port_params} --runtime=nvidia --cap-add=SYS_ADMIN --ipc=host --mount type=bind,source='/home/tako${server_number}/share/user-share/',target=/home/ --name '${container_name_param}' -e USER_ID='${username}' -e GID='${available_gid}' -e USER_PW='ailab2260' -e USER_GROUP='${groupname}' -e UID='${available_uid}' -e NVIDIA_DRIVER_CAPABILITIES='compute,utility,graphics,display' dguailab/${container_image}:${container_version}"
+vnc_env_params=""
+if [ "$enable_vnc" = "true" ]; then
+  vnc_env_params=" -e ENABLE_VNC='true'"
+fi
+
+remote_run_command="docker run -dit --gpus device=all --memory=192g --memory-swap=192g ${port_params} --runtime=nvidia --cap-add=SYS_ADMIN --ipc=host --mount type=bind,source='/home/tako${server_number}/share/user-share/',target=/home/ --name '${container_name_param}' -e USER_ID='${username}' -e GID='${available_gid}' -e USER_PW='ailab2260' -e USER_GROUP='${groupname}' -e UID='${available_uid}'${vnc_env_params} -e NVIDIA_DRIVER_CAPABILITIES='compute,utility,graphics,display' dguailab/${container_image}:${container_version}"
 container_output=$(run_remote_shell_capture "$target_host" "$remote_run_command") || cleanup_and_exit "Failed to create Docker container on ${target_host}"
 container_id=$(printf '%s\n' "$container_output" | tail -n1 | tr -d '\r')
 

@@ -190,6 +190,7 @@ bash script/create_container.sh \
 - `--server-id LAB10` 형식 또는 `--domain LAB --server-number 10` 형식 모두 지원합니다.
 - `--no-container-name` 을 주면 기본 이름 규칙 `username_by_createdby` 를 사용합니다.
 - `--no-additional-ports` 를 주면 SSH/Jupyter 기본 포트만 할당합니다.
+- `--enable-vnc true` 또는 `--enable_vnc true` 를 주면 컨테이너 내부 `6080` 포트를 자동으로 추가 매핑하고, Docker 환경변수 `ENABLE_VNC=true` 를 전달합니다. 외부 포트는 기존 포트 배정 방식으로 자동 선택됩니다.
 
 ### 2. 컨테이너 삭제
 
