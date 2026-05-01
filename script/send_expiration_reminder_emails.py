@@ -160,6 +160,8 @@ def load_smtp_config() -> Dict[str, object]:
         "timeout": int(get_value("SMTP_TIMEOUT", "30")),
         "support_manual_url": get_value("SUPPORT_MANUAL_URL"),
         "error_report_form_url": get_value("ERROR_REPORT_FORM_URL"),
+        "error_report_form_url_farm": get_value("ERROR_REPORT_FORM_URL_FARM"),
+        "error_report_form_url_lab": get_value("ERROR_REPORT_FORM_URL_LAB"),
         "cc_emails": load_admin_cc_emails(),
     }
 
@@ -330,6 +332,35 @@ def group_rows_by_person(rows: List[Dict[str, object]]) -> List[Tuple[str, List[
     ]
 
 
+def resolve_error_report_form_links(
+    smtp_config: Dict[str, object],
+    rows: List[Dict[str, object]],
+) -> List[Tuple[str, str]]:
+    fallback_url = str(smtp_config.get("error_report_form_url") or "").strip()
+    domains = sorted(
+        {
+            str(row.get("domain_name") or "").strip().upper()
+            for row in rows
+            if str(row.get("domain_name") or "").strip()
+        }
+    )
+
+    links: List[Tuple[str, str]] = []
+    seen_urls = set()
+    for domain_name in domains:
+        domain_key = f"error_report_form_url_{domain_name.lower()}"
+        domain_url = str(smtp_config.get(domain_key) or "").strip() or fallback_url
+        if not domain_url or domain_url in seen_urls:
+            continue
+        seen_urls.add(domain_url)
+        links.append((domain_name, domain_url))
+
+    if not links and fallback_url:
+        links.append(("COMMON", fallback_url))
+
+    return links
+
+
 def build_email_message(
     smtp_config: Dict[str, object],
     recipient_email: str,
@@ -340,7 +371,7 @@ def build_email_message(
     salutation = ", ".join(display_names) if display_names else "사용자"
     expiring_dates = sorted({str(row["expiring_date"]) for row in rows})
     support_manual_url = str(smtp_config.get("support_manual_url") or "").strip()
-    error_report_form_url = str(smtp_config.get("error_report_form_url") or "").strip()
+    error_report_form_links = resolve_error_report_form_links(smtp_config, rows)
     person_groups = group_rows_by_person(rows)
 
     lines = [
@@ -384,8 +415,11 @@ def build_email_message(
     )
     if support_manual_url:
         lines.append(f"매뉴얼: {support_manual_url}")
-    if error_report_form_url:
-        lines.append(f"오류 신고 폼: {error_report_form_url}")
+    for domain_name, form_url in error_report_form_links:
+        if domain_name == "COMMON":
+            lines.append(f"오류 신고 폼: {form_url}")
+        else:
+            lines.append(f"오류 신고 폼({domain_name}): {form_url}")
     lines.extend(
         [
             "",
@@ -432,8 +466,11 @@ def build_email_message(
     )
     if support_manual_url:
         lines.append(f"Manual: {support_manual_url}")
-    if error_report_form_url:
-        lines.append(f"Error Report Form: {error_report_form_url}")
+    for domain_name, form_url in error_report_form_links:
+        if domain_name == "COMMON":
+            lines.append(f"Error Report Form: {form_url}")
+        else:
+            lines.append(f"Error Report Form ({domain_name}): {form_url}")
     lines.extend(
         [
             "",

@@ -115,6 +115,8 @@ def load_smtp_config(project_root: Path) -> Dict[str, object]:
         "timeout": int(get_value("SMTP_TIMEOUT", "30")),
         "support_manual_url": get_value("SUPPORT_MANUAL_URL"),
         "error_report_form_url": get_value("ERROR_REPORT_FORM_URL"),
+        "error_report_form_url_farm": get_value("ERROR_REPORT_FORM_URL_FARM"),
+        "error_report_form_url_lab": get_value("ERROR_REPORT_FORM_URL_LAB"),
         "cc_emails": load_admin_cc_emails(project_root),
     }
 

@@ -128,6 +128,8 @@ cp config/reminder_admins.example.txt config/reminder_admins.local.txt
 - `EMAIL_TO_OVERRIDE`
 - `SUPPORT_MANUAL_URL`
 - `ERROR_REPORT_FORM_URL`
+- `ERROR_REPORT_FORM_URL_FARM`
+- `ERROR_REPORT_FORM_URL_LAB`
 
 ### Google Sheets 설정
 
