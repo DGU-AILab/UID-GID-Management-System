@@ -24,6 +24,13 @@ phone=""
 note=""
 server_id_input=""
 dry_run=false
+user_password=""
+vnc_password=""
+
+generate_password() {
+  local length="$1"
+  tr -dc A-Za-z0-9 </dev/urandom | head -c "$length"
+}
 
 function show_help {
   echo "Usage: $0 [options]"
@@ -49,6 +56,8 @@ function show_help {
   echo "      --email EMAIL               User email (required)"
   echo "      --phone PHONE               User phone (required)"
   echo "  -m, --note NOTE                 Additional notes"
+  echo "      --user-password PASSWORD    Initial Ubuntu user password (auto-generated if omitted)"
+  echo "      --vnc-password PASSWORD     Initial VNC password, max 8 chars (auto-generated if omitted when VNC is enabled)"
   echo "      --dry-run                   Show planned actions without changing remote hosts or DB"
   exit 0
 }
@@ -148,6 +157,14 @@ while [[ $# -gt 0 ]]; do
     note="$2"
     shift 2
     ;;
+  --user-password)
+    user_password="$2"
+    shift 2
+    ;;
+  --vnc-password)
+    vnc_password="$2"
+    shift 2
+    ;;
   --dry-run)
     dry_run=true
     shift
@@ -243,6 +260,15 @@ if [ -z "$note" ]; then
   read -p "Note: " note
 fi
 
+if [ -z "$user_password" ]; then
+  user_password="$(generate_password 12)"
+fi
+
+if ! [[ "$user_password" =~ ^[A-Za-z0-9]+$ ]]; then
+  echo "Error: --user-password must contain only letters and numbers."
+  exit 1
+fi
+
 if [ "$enable_vnc" = "true" ] && [ -n "$container_ports" ]; then
   filtered_container_ports=()
   IFS=',' read -ra EXISTING_CONTAINER_PORT_LIST <<<"$container_ports"
@@ -253,6 +279,17 @@ if [ "$enable_vnc" = "true" ] && [ -n "$container_ports" ]; then
     fi
   done
   container_ports=$(IFS=,; echo "${filtered_container_ports[*]}")
+fi
+
+if [ "$enable_vnc" = "true" ]; then
+  if [ -z "$vnc_password" ]; then
+    vnc_password="$(generate_password 8)"
+  fi
+  vnc_password="${vnc_password:0:8}"
+  if ! [[ "$vnc_password" =~ ^[A-Za-z0-9]+$ ]]; then
+    echo "Error: --vnc-password must contain only letters and numbers."
+    exit 1
+  fi
 fi
 
 echo ""
@@ -277,6 +314,10 @@ echo "  Email: $email"
 echo "  Phone: $phone"
 echo "  Note: $note"
 echo "  Dry Run: $dry_run"
+echo "  Initial Ubuntu password: prepared"
+if [ "$enable_vnc" = "true" ]; then
+  echo "  Initial VNC password: prepared"
+fi
 echo ""
 echo ""
 
@@ -442,10 +483,10 @@ mysql_exec -e "START TRANSACTION;" || exit 1
 
 vnc_env_params=""
 if [ "$enable_vnc" = "true" ]; then
-  vnc_env_params=" -e ENABLE_VNC='true'"
+  vnc_env_params=" -e ENABLE_VNC='true' -e VNC_PASSWORD='${vnc_password}'"
 fi
 
-remote_run_command="docker run -dit --gpus device=all --memory=192g --memory-swap=192g ${port_params} --runtime=nvidia --cap-add=SYS_ADMIN --ipc=host --mount type=bind,source='/home/tako${server_number}/share/user-share/',target=/home/ --name '${container_name_param}' -e USER_ID='${username}' -e GID='${available_gid}' -e USER_PW='ailab2260' -e USER_GROUP='${groupname}' -e UID='${available_uid}'${vnc_env_params} -e NVIDIA_DRIVER_CAPABILITIES='compute,utility,graphics,display' dguailab/${container_image}:${container_version}"
+remote_run_command="docker run -dit --gpus device=all --memory=192g --memory-swap=192g ${port_params} --runtime=nvidia --cap-add=SYS_ADMIN --ipc=host --mount type=bind,source='/home/tako${server_number}/share/user-share/',target=/home/ --name '${container_name_param}' -e USER_ID='${username}' -e GID='${available_gid}' -e USER_PW='${user_password}' -e USER_GROUP='${groupname}' -e UID='${available_uid}'${vnc_env_params} -e NVIDIA_DRIVER_CAPABILITIES='compute,utility,graphics,display' dguailab/${container_image}:${container_version}"
 container_output=$(run_remote_shell_capture "$target_host" "$remote_run_command") || cleanup_and_exit "Failed to create Docker container on ${target_host}"
 container_id=$(printf '%s\n' "$container_output" | tail -n1 | tr -d '\r')
 
@@ -606,7 +647,9 @@ if ! python3 "${PROJECT_ROOT}/script/send_container_created_email.py" \
   --ssh-port "$available_ssh_port" \
   --jupyter-port "$available_jupyter_port" \
   --additional-port-mappings "$additional_port_mappings_for_email" \
-  --vnc-port "$vnc_host_port"; then
+  --user-password "$user_password" \
+  --vnc-port "$vnc_host_port" \
+  --vnc-password "$vnc_password"; then
   log_error "creation_notification_failed username=${username} server=${server_id}"
 fi
 

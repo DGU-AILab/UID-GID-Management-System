@@ -28,7 +28,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ssh-port", required=True)
     parser.add_argument("--jupyter-port", required=True)
     parser.add_argument("--additional-port-mappings", default="")
+    parser.add_argument("--user-password", default="")
     parser.add_argument("--vnc-port", default="")
+    parser.add_argument("--vnc-password", default="")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -119,6 +121,7 @@ def build_message(
             "",
             "[접속 정보]",
             f"- SSH 접속 명령어: ssh -p {args.ssh_port} {args.username}@{public_ip}",
+            f"- SSH/Ubuntu 초기 비밀번호: {args.user_password}",
             f"- JupyterLab 웹페이지 주소: http://{public_ip}:{args.jupyter_port}",
             f"- JupyterLab token 위치: /home/{args.username}/decs_jupyter_lab/jupyter_token.txt",
         ]
@@ -129,6 +132,7 @@ def build_message(
             [
                 f"- GUI/noVNC 접속 URL: http://{public_ip}:{args.vnc_port}",
                 f"- VNC 비밀번호 저장 위치: /home/{args.username}/vnc_password.txt",
+                f"- VNC 초기 비밀번호: {args.vnc_password}",
             ]
         )
 
@@ -136,7 +140,7 @@ def build_message(
         [
             "",
             "[초기 설정]",
-            "- 현재 제공 받은 기본 패스워드는 보안을 위해 반드시 변경해주세요.",
+            "- 메일에 포함된 초기 비밀번호는 보안을 위해 반드시 변경해주세요.",
             "- 24시간 내에 변경하지 않을 경우 컨테이너가 경고없이 삭제될 수 있습니다.",
             f"- SSH/Ubuntu 비밀번호 변경 방법: sudo passwd {args.username}",
             "- JupyterLab Password도 제공된 token 값을 사용하여 변경해주세요.",
