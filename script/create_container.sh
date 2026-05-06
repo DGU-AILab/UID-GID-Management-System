@@ -243,26 +243,16 @@ if [ -z "$note" ]; then
   read -p "Note: " note
 fi
 
-if [ "$enable_vnc" = "true" ]; then
-  vnc_port_present=false
-  if [ -n "$container_ports" ]; then
-    IFS=',' read -ra EXISTING_CONTAINER_PORT_LIST <<<"$container_ports"
-    for existing_container_port in "${EXISTING_CONTAINER_PORT_LIST[@]}"; do
-      existing_container_port="$(echo "$existing_container_port" | xargs)"
-      if [ "$existing_container_port" = "6080" ]; then
-        vnc_port_present=true
-        break
-      fi
-    done
-  fi
-
-  if [ "$vnc_port_present" = "false" ]; then
-    if [ -n "$container_ports" ]; then
-      container_ports="${container_ports},6080"
-    else
-      container_ports="6080"
+if [ "$enable_vnc" = "true" ] && [ -n "$container_ports" ]; then
+  filtered_container_ports=()
+  IFS=',' read -ra EXISTING_CONTAINER_PORT_LIST <<<"$container_ports"
+  for existing_container_port in "${EXISTING_CONTAINER_PORT_LIST[@]}"; do
+    existing_container_port="$(echo "$existing_container_port" | xargs)"
+    if [ -n "$existing_container_port" ] && [ "$existing_container_port" != "6080" ]; then
+      filtered_container_ports+=("$existing_container_port")
     fi
-  fi
+  done
+  container_ports=$(IFS=,; echo "${filtered_container_ports[*]}")
 fi
 
 echo ""
@@ -372,18 +362,35 @@ fi
 all_ports=($available_ssh_port $available_jupyter_port)
 port_params="-p ${available_ssh_port}:22 -p ${available_jupyter_port}:8888"
 port_mappings=()
+additional_port_mappings=()
 port_mappings+=("${available_ssh_port}:22")
 port_mappings+=("${available_jupyter_port}:8888")
+vnc_host_port=""
+
+if [ "$enable_vnc" = "true" ]; then
+  if [ ${#available_ports[@]} -gt 0 ]; then
+    vnc_host_port=${available_ports[0]}
+    available_ports=("${available_ports[@]:1}")
+    port_params+=" -p ${vnc_host_port}:6080"
+    all_ports+=($vnc_host_port)
+    port_mappings+=("${vnc_host_port}:6080")
+    echo "Using VNC/noVNC port: $vnc_host_port"
+  else
+    echo "Warning: Not enough available ports for VNC/noVNC port 6080"
+  fi
+fi
 
 if [ -n "$container_ports" ]; then
   IFS=',' read -ra CONTAINER_PORT_LIST <<<"$container_ports"
   for container_port in "${CONTAINER_PORT_LIST[@]}"; do
+    container_port="$(echo "$container_port" | xargs)"
     if [ ${#available_ports[@]} -gt 0 ]; then
       host_port=${available_ports[0]}
       available_ports=("${available_ports[@]:1}")
       port_params+=" -p ${host_port}:${container_port}"
       all_ports+=($host_port)
       port_mappings+=("${host_port}:${container_port}")
+      additional_port_mappings+=("${host_port}:${container_port}")
       echo "Mapping host port ${host_port} to container port ${container_port}"
     else
       echo "Warning: Not enough available ports for container port ${container_port}"
@@ -397,9 +404,12 @@ if [ "$dry_run" = "true" ]; then
   echo "[DRY-RUN] Docker image pull: dguailab/${container_image}:${container_version}"
   echo "[DRY-RUN] Docker container name: ${container_name_param}"
   echo "[DRY-RUN] Primary ports: SSH=${available_ssh_port}, Jupyter=${available_jupyter_port}"
-  if [ ${#port_mappings[@]} -gt 2 ]; then
+  if [ "$enable_vnc" = "true" ] && [ -n "$vnc_host_port" ]; then
+    echo "[DRY-RUN] VNC/noVNC port: ${vnc_host_port}"
+  fi
+  if [ ${#additional_port_mappings[@]} -gt 0 ]; then
     echo "[DRY-RUN] Additional port mappings:"
-    for mapping in "${port_mappings[@]:2}"; do
+    for mapping in "${additional_port_mappings[@]}"; do
       echo "  - ${mapping}"
     done
   fi
@@ -423,9 +433,9 @@ if [ "$dry_run" = "true" ]; then
   exit 0
 fi
 
-echo "Pulling Docker image dguailab/$container_image:$container_version on ${target_host}..."
-if ! run_remote_shell "$target_host" "docker pull dguailab/$container_image:$container_version"; then
-  cleanup_and_exit "Failed to pull Docker image on ${target_host}"
+echo "Ensuring Docker image dguailab/$container_image:$container_version is available on ${target_host}..."
+if ! run_remote_shell "$target_host" "docker image inspect dguailab/$container_image:$container_version >/dev/null 2>&1 || docker pull dguailab/$container_image:$container_version"; then
+  cleanup_and_exit "Failed to ensure Docker image on ${target_host}"
 fi
 
 mysql_exec -e "START TRANSACTION;" || exit 1
@@ -477,7 +487,13 @@ if ! mysql_exec -N -e "INSERT INTO used_ports (port_number, purpose_of_use) VALU
   cleanup_and_exit "Failed to insert Jupyter port into database"
 fi
 
-for port_mapping in "${port_mappings[@]:2}"; do
+if [ "$enable_vnc" = "true" ] && [ -n "$vnc_host_port" ]; then
+  if ! mysql_exec -N -e "INSERT INTO used_ports (port_number, purpose_of_use) VALUES ($vnc_host_port, 'vnc');" >/dev/null; then
+    cleanup_and_exit "Failed to insert VNC port into database"
+  fi
+fi
+
+for port_mapping in "${additional_port_mappings[@]}"; do
   IFS=':' read -ra PORTS <<<"$port_mapping"
   if [[ ${#PORTS[@]} -eq 2 ]]; then
     host_port=${PORTS[0]}
@@ -574,9 +590,9 @@ for mapping in "${port_mappings[@]}"; do
   echo "  $mapping"
 done
 
-additional_port_mappings=""
-if [ ${#port_mappings[@]} -gt 2 ]; then
-  additional_port_mappings=$(IFS=,; echo "${port_mappings[*]:2}")
+additional_port_mappings_for_email=""
+if [ ${#additional_port_mappings[@]} -gt 0 ]; then
+  additional_port_mappings_for_email=$(IFS=,; echo "${additional_port_mappings[*]}")
 fi
 
 echo "Sending container creation notification email..."
@@ -589,7 +605,8 @@ if ! python3 "${PROJECT_ROOT}/script/send_container_created_email.py" \
   --version "$container_version" \
   --ssh-port "$available_ssh_port" \
   --jupyter-port "$available_jupyter_port" \
-  --additional-port-mappings "$additional_port_mappings"; then
+  --additional-port-mappings "$additional_port_mappings_for_email" \
+  --vnc-port "$vnc_host_port"; then
   log_error "creation_notification_failed username=${username} server=${server_id}"
 fi
 

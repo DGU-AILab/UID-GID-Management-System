@@ -28,6 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ssh-port", required=True)
     parser.add_argument("--jupyter-port", required=True)
     parser.add_argument("--additional-port-mappings", default="")
+    parser.add_argument("--vnc-port", default="")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -107,6 +108,8 @@ def build_message(
         f"- SSH 포트번호: {args.ssh_port}",
         f"- JUPYTER 포트번호: {args.jupyter_port}",
     ]
+    if args.vnc_port:
+        lines.append(f"- VNC 포트번호: {args.vnc_port}")
     for index, additional_port in enumerate(additional_port_lines):
         label = "- 추가 포트" if index == 0 else "- 추가 포트"
         lines.append(f"{label}: {additional_port}")
@@ -118,14 +121,36 @@ def build_message(
             f"- SSH 접속 명령어: ssh -p {args.ssh_port} {args.username}@{public_ip}",
             f"- JupyterLab 웹페이지 주소: http://{public_ip}:{args.jupyter_port}",
             f"- JupyterLab token 위치: /home/{args.username}/decs_jupyter_lab/jupyter_token.txt",
+        ]
+    )
+
+    if args.vnc_port:
+        lines.extend(
+            [
+                f"- GUI/noVNC 접속 URL: http://{public_ip}:{args.vnc_port}",
+                f"- VNC 비밀번호 저장 위치: /home/{args.username}/vnc_password.txt",
+            ]
+        )
+
+    lines.extend(
+        [
             "",
             "[초기 설정]",
             "- 현재 제공 받은 기본 패스워드는 보안을 위해 반드시 변경해주세요.",
             "- 24시간 내에 변경하지 않을 경우 컨테이너가 경고없이 삭제될 수 있습니다.",
-            f"- 변경 방법: sudo passwd {args.username}",
+            f"- SSH/Ubuntu 비밀번호 변경 방법: sudo passwd {args.username}",
             "- JupyterLab Password도 제공된 token 값을 사용하여 변경해주세요.",
         ]
     )
+
+    if args.vnc_port:
+        lines.extend(
+            [
+                "- VNC 비밀번호도 반드시 변경해주세요. VNC 비밀번호는 최대 8자까지만 사용됩니다.",
+                "- VNC 비밀번호 변경 방법: vncpasswd",
+                f"- 컨테이너 재시작 후에도 같은 VNC 비밀번호를 사용하려면 변경한 비밀번호를 /home/{args.username}/vnc_password.txt에도 저장해주세요.",
+            ]
+        )
 
     if manual_url:
         lines.extend(["", "[사용자 매뉴얼]", f"- {manual_url}"])
