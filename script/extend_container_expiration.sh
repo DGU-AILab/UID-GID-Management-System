@@ -180,6 +180,7 @@ for domain_name in "${DOMAINS[@]}"; do
       DATE_FORMAT(dc.expiring_at, '%Y-%m-%d'),
       u.name,
       u.ubuntu_username,
+      u.email,
       IFNULL(GROUP_CONCAT(up.port_number ORDER BY up.port_number SEPARATOR ', '), '')
     FROM docker_container dc
     JOIN user u ON u.id = dc.user_id
@@ -188,7 +189,7 @@ for domain_name in "${DOMAINS[@]}"; do
       ${name_sql}
       ${username_sql}
       ${port_sql}
-    GROUP BY dc.id, dc.container_name, dc.server_id, dc.expiring_at, u.name, u.ubuntu_username
+    GROUP BY dc.id, dc.container_name, dc.server_id, dc.expiring_at, u.name, u.ubuntu_username, u.email
     ORDER BY dc.expiring_at ASC, dc.server_id ASC, dc.container_name ASC;
   ")"
 
@@ -214,7 +215,7 @@ echo "Matched containers:"
 match_index=0
 invalid_extension_count=0
 
-while IFS=$'\t' read -r domain_name db_container_id container_name server_id current_expiration matched_name matched_username matched_ports; do
+while IFS=$'\t' read -r domain_name db_container_id container_name server_id current_expiration matched_name matched_username matched_email matched_ports; do
   [ -z "${db_container_id}" ] && continue
   match_index=$((match_index + 1))
   echo "  ${match_index}. ${container_name} | user=${matched_username} (${matched_name}) | server=${server_id} | ports=${matched_ports:-none} | current=${current_expiration} | new=${new_expiration_date}"
@@ -248,7 +249,7 @@ trap 'cleanup_mysql_client_config; cleanup_matches_file; cleanup_updated_domains
 
 updated_count=0
 
-while IFS=$'\t' read -r domain_name db_container_id container_name server_id current_expiration matched_name matched_username matched_ports; do
+while IFS=$'\t' read -r domain_name db_container_id container_name server_id current_expiration matched_name matched_username matched_email matched_ports; do
   [ -z "${db_container_id}" ] && continue
   db_host="$(resolve_db_host_for_domain "${domain_name}")" || exit 1
   create_mysql_client_config "${db_host}"
@@ -270,6 +271,23 @@ while IFS=$'\t' read -r domain_name db_container_id container_name server_id cur
   printf '%s\n' "${domain_name}" >>"${updated_domains_file}"
   updated_count=$((updated_count + 1))
   echo "Updated ${container_name} on ${server_id}: ${current_expiration} -> ${new_expiration_date}"
+
+  if [ -n "${matched_email}" ]; then
+    echo "Sending expiration extension notification email to ${matched_email}..."
+    if ! python3 "${PROJECT_ROOT}/script/send_container_extended_email.py" \
+      --recipient-email "${matched_email}" \
+      --name "${matched_name}" \
+      --username "${matched_username}" \
+      --server-id "${server_id}" \
+      --container-name "${container_name}" \
+      --current-expiration "${current_expiration}" \
+      --new-expiration "${new_expiration_date}" \
+      --allocated-ports "${matched_ports}"; then
+      log_error "extension_notification_failed username=${matched_username} server=${server_id}"
+    fi
+  else
+    log_error "extension_notification_skipped_missing_email username=${matched_username} server=${server_id}"
+  fi
 done <"${matches_file}"
 
 if [ "${updated_count}" -gt 0 ]; then

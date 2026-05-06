@@ -574,6 +574,25 @@ for mapping in "${port_mappings[@]}"; do
   echo "  $mapping"
 done
 
+additional_port_mappings=""
+if [ ${#port_mappings[@]} -gt 2 ]; then
+  additional_port_mappings=$(IFS=,; echo "${port_mappings[*]:2}")
+fi
+
+echo "Sending container creation notification email..."
+if ! python3 "${PROJECT_ROOT}/script/send_container_created_email.py" \
+  --recipient-email "$email" \
+  --name "$name" \
+  --username "$username" \
+  --server-id "$server_id" \
+  --image "$container_image" \
+  --version "$container_version" \
+  --ssh-port "$available_ssh_port" \
+  --jupyter-port "$available_jupyter_port" \
+  --additional-port-mappings "$additional_port_mappings"; then
+  log_error "creation_notification_failed username=${username} server=${server_id}"
+fi
+
 echo "Creating database backup..."
 backup_database_locally "$domain_name" || true
 
