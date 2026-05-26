@@ -72,9 +72,10 @@ create_container() {
     fi
 
     if $DRY_RUN; then
-        log_info "[DRY-RUN] Would run: docker run -dit --name \"$cname\" $port_args -e USER_ID=$uname -e UID=$uid -e GID=$gid dguailab/$image:$version"
+        log_info "[DRY-RUN] Would run: docker run -dit --init --name \"$cname\" $port_args -e USER_ID=$uname -e UID=$uid -e GID=$gid dguailab/$image:$version"
     else
         docker run -dit \
+            --init \
             --name "$cname" \
             $port_args \
             -e USER_ID="$uname" -e UID="$uid" -e GID="$gid" \
