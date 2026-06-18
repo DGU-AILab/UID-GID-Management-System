@@ -59,6 +59,10 @@ function show_help {
   echo "      --user-password PASSWORD    Initial Ubuntu user password (auto-generated if omitted)"
   echo "      --vnc-password PASSWORD     Initial VNC password, max 8 chars (auto-generated if omitted when VNC is enabled)"
   echo "      --dry-run                   Show planned actions without changing remote hosts or DB"
+  echo ""
+  echo "FARM NAS home provisioning can be configured with FARM_NAS_HOST,"
+  echo "FARM_NAS_PORT, FARM_NAS_USER, FARM_NAS_SSH_KEY, FARM_NAS_USER_SHARE_ROOT,"
+  echo "and FARM_NAS_SUDO in config/db_config.local.env."
   exit 0
 }
 
@@ -379,6 +383,11 @@ else
   fi
 fi
 
+farm_nas_home_dir=""
+if [ "$domain_name" = "FARM" ]; then
+  farm_nas_home_dir="$(farm_nas_user_home_dir "$username")"
+fi
+
 function cleanup_and_exit {
   echo "Error: $1"
 
@@ -467,6 +476,9 @@ if [ "$dry_run" = "true" ]; then
   else
     echo "[DRY-RUN] New group will be created: ${groupname} (${available_gid})"
   fi
+  if [ "$domain_name" = "FARM" ]; then
+    echo "[DRY-RUN] Would prepare FARM NAS home: ${farm_nas_home_dir} (${available_uid}:${available_gid})"
+  fi
   echo "[DRY-RUN] Would run remote docker create on ${target_host}"
   echo "[DRY-RUN] Would write user/container/port records to ${db_host}:${DB_PORT}/${DB_NAME}"
   echo "[DRY-RUN] Would create local DB backup for ${domain_name}"
@@ -479,6 +491,13 @@ if ! run_remote_shell "$target_host" "docker image inspect dguailab/$container_i
   cleanup_and_exit "Failed to ensure Docker image on ${target_host}"
 fi
 
+if [ "$domain_name" = "FARM" ]; then
+  echo "Preparing FARM NAS home ${farm_nas_home_dir} for ${username} (${available_uid}:${available_gid})..."
+  if ! prepare_farm_nas_user_home "$username" "$available_uid" "$available_gid"; then
+    cleanup_and_exit "Failed to prepare FARM NAS home for ${username}"
+  fi
+fi
+
 mysql_exec -e "START TRANSACTION;" || exit 1
 
 vnc_env_params=""
@@ -486,7 +505,7 @@ if [ "$enable_vnc" = "true" ]; then
   vnc_env_params=" -e ENABLE_VNC='true' -e VNC_PASSWORD='${vnc_password}'"
 fi
 
-remote_run_command="docker run -dit --init --gpus device=all --memory=192g --memory-swap=192g ${port_params} --runtime=nvidia --cap-add=SYS_ADMIN --ipc=host --mount type=bind,source='/home/tako${server_number}/share/user-share/',target=/home/ --name '${container_name_param}' -e USER_ID='${username}' -e GID='${available_gid}' -e USER_PW='${user_password}' -e USER_GROUP='${groupname}' -e UID='${available_uid}'${vnc_env_params} -e NVIDIA_DRIVER_CAPABILITIES='compute,utility,graphics,display' dguailab/${container_image}:${container_version}"
+remote_run_command="docker run -dit --init --gpus device=all --memory=192g --memory-swap=192g ${port_params} --runtime=nvidia --cap-add=SYS_ADMIN --ipc=host --mount type=bind,source='/home/tako${server_number}/share/user-share/',target=/home/ --name '${container_name_param}' -e USER_ID='${username}' -e GID='${available_gid}' -e TARGET_GID='${available_gid}' -e USER_PW='${user_password}' -e USER_GROUP='${groupname}' -e UID='${available_uid}' -e TARGET_UID='${available_uid}'${vnc_env_params} -e NVIDIA_DRIVER_CAPABILITIES='compute,utility,graphics,display' dguailab/${container_image}:${container_version}"
 container_output=$(run_remote_shell_capture "$target_host" "$remote_run_command") || cleanup_and_exit "Failed to create Docker container on ${target_host}"
 container_id=$(printf '%s\n' "$container_output" | tail -n1 | tr -d '\r')
 

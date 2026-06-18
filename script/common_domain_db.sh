@@ -256,6 +256,10 @@ mysqldump_exec() {
   mysqldump --defaults-extra-file="$MYSQL_CNF_FILE" --no-tablespaces "$DB_NAME" "$@"
 }
 
+shell_quote() {
+  printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
+}
+
 run_remote_shell() {
   local host_alias="$1"
   local remote_command="$2"
@@ -273,6 +277,61 @@ run_remote_shell_capture() {
   fi
 
   printf '%s\n' "$output"
+}
+
+farm_nas_user_home_dir() {
+  local username="$1"
+  local share_root="${FARM_NAS_USER_SHARE_ROOT:-/volume1/share/user-share}"
+  share_root="${share_root%/}"
+  printf '%s/%s\n' "$share_root" "$username"
+}
+
+build_farm_nas_prepare_home_command() {
+  local home_dir="$1"
+  local uid="$2"
+  local gid="$3"
+  local sudo_prefix="${FARM_NAS_SUDO-sudo -n}"
+  local quoted_home quoted_owner
+
+  quoted_home="$(shell_quote "$home_dir")"
+  quoted_owner="$(shell_quote "${uid}:${gid}")"
+
+  cat <<EOF
+set -eu
+${sudo_prefix} mkdir -p ${quoted_home}
+${sudo_prefix} chown ${quoted_owner} ${quoted_home}
+${sudo_prefix} chmod 750 ${quoted_home}
+EOF
+}
+
+prepare_farm_nas_user_home() {
+  local username="$1"
+  local uid="$2"
+  local gid="$3"
+  local nas_host="${FARM_NAS_HOST:-192.168.2.30}"
+  local nas_port="${FARM_NAS_PORT:-6954}"
+  local nas_user="${FARM_NAS_USER:-jy}"
+  local nas_key="${FARM_NAS_SSH_KEY:-}"
+  local nas_home_dir raw_command
+  local ansible_args=()
+
+  nas_home_dir="$(farm_nas_user_home_dir "$username")"
+  raw_command="$(build_farm_nas_prepare_home_command "$nas_home_dir" "$uid" "$gid")"
+
+  ansible_args=(
+    "$nas_host"
+    -i "${nas_host},"
+    -u "$nas_user"
+    -e "ansible_port=${nas_port}"
+    -m raw
+    -a "$raw_command"
+  )
+
+  if [ -n "$nas_key" ]; then
+    ansible_args+=(--private-key "$nas_key")
+  fi
+
+  ansible "${ansible_args[@]}"
 }
 
 backup_database_locally() {

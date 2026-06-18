@@ -91,16 +91,17 @@ bash script/create_container.sh \
 3. 관리 서버에서 MySQL 접속 확인. dry-run도 DB 읽기 필요.
 4. DB의 `used_ports` 조회 후 포트 배정. 서버 번호 `N` 의 포트 블록은 `9000 + 100 * (N - 1)` 부터 `9000 + 100 * N - 1` 까지. SSH `22`, Jupyter `8888` 에 외부 포트 2개 우선 배정. VNC와 추가 포트는 남은 포트 순차 배정.
 5. DB의 `user`, `group`, `used_ids` 조회 후 UID/GID 결정. 기존 username은 UID 재사용. 신규 username은 `used_ids` 최댓값 다음 번호 사용. group이 비어 있으면 username을 group으로 사용.
-6. `--dry-run` 인 경우 원격 Docker 실행, DB 쓰기, 백업, export, 메일 발송 없이 계획만 출력 후 종료.
+6. `--dry-run` 인 경우 원격 Docker 실행, FARM NAS 홈 생성, DB 쓰기, 백업, export, 메일 발송 없이 계획만 출력 후 종료.
 7. 대상 서버에서 Ansible shell로 `docker image inspect dguailab/<image>:<version>` 실행. 이미지가 없으면 `docker pull`.
-8. DB transaction 시작.
-9. 대상 서버에서 Ansible shell로 `docker run -dit ...` 실행. 주요 옵션: GPU 전체 사용, 메모리 `192g`, `--runtime=nvidia`, `/home/takoN/share/user-share/` bind mount, `USER_ID`, `UID`, `GID`, `USER_PW`, `USER_GROUP` 환경변수 전달.
-10. 생성된 container id 형식 확인. `docker inspect` 와 `docker port` 로 컨테이너와 SSH 포트 바인딩 검증.
-11. 같은 transaction 안에서 `used_ids`, `used_ports`, `group`, `user`, `docker_container` 기록. `used_ports.docker_container_record_id` 를 새 `docker_container.id` 로 연결.
-12. DB transaction commit.
-13. 생성 안내 메일 발송. SSH/Jupyter/VNC 접속 정보와 초기 비밀번호 포함.
-14. 도메인 DB를 `BACKUP_ROOT_DIR/<domain>/nfs_db_backup_YYYYMMDD_HHMMSS.sql.gz` 로 백업.
-15. `script/export_users_to_excel.py --domains LAB,FARM` 실행. Excel/Google Sheets export 갱신.
+8. FARM이면 NAS에 raw Ansible SSH로 접속해 `FARM_NAS_USER_SHARE_ROOT/<username>` 홈 디렉토리를 `UID:GID`, `750` 권한으로 미리 생성.
+9. DB transaction 시작.
+10. 대상 서버에서 Ansible shell로 `docker run -dit ...` 실행. 주요 옵션: GPU 전체 사용, 메모리 `192g`, `--runtime=nvidia`, `/home/takoN/share/user-share/` bind mount, `USER_ID`, `UID`, `TARGET_UID`, `GID`, `TARGET_GID`, `USER_PW`, `USER_GROUP` 환경변수 전달.
+11. 생성된 container id 형식 확인. `docker inspect` 와 `docker port` 로 컨테이너와 SSH 포트 바인딩 검증.
+12. 같은 transaction 안에서 `used_ids`, `used_ports`, `group`, `user`, `docker_container` 기록. `used_ports.docker_container_record_id` 를 새 `docker_container.id` 로 연결.
+13. DB transaction commit.
+14. 생성 안내 메일 발송. SSH/Jupyter/VNC 접속 정보와 초기 비밀번호 포함.
+15. 도메인 DB를 `BACKUP_ROOT_DIR/<domain>/nfs_db_backup_YYYYMMDD_HHMMSS.sql.gz` 로 백업.
+16. `script/export_users_to_excel.py --domains LAB,FARM` 실행. Excel/Google Sheets export 갱신.
 
 생성 실패 처리:
 
@@ -444,6 +445,12 @@ DB_HOST=127.0.0.1
 ANSIBLE_INVENTORY=/home/jy/ansible/inventory.ini
 BACKUP_ROOT_DIR=/home/jy/uid/mysql_backups
 
+FARM_NAS_HOST=192.168.2.30
+FARM_NAS_PORT=6954
+FARM_NAS_USER=jy
+FARM_NAS_USER_SHARE_ROOT=/volume1/share/user-share
+FARM_NAS_SUDO="sudo -n"
+
 EXPORT_DOMAINS=LAB,FARM
 SERVER_DOMAIN=LAB
 ```
@@ -461,6 +468,10 @@ SERVER_DOMAIN=LAB
 | `DB_HOST` | 일부 legacy/maintenance 스크립트용 단일 DB host fallback. LAB/FARM 분리 운영에서는 `LAB_DB_HOST`, `FARM_DB_HOST` 우선. |
 | `ANSIBLE_INVENTORY` | create/delete가 원격 Docker 명령을 실행할 Ansible inventory 절대 경로. |
 | `BACKUP_ROOT_DIR` | create/delete 성공 후 `mysqldump` 백업 저장용 관리 서버 로컬 디렉토리. 생략 시 `mysql_backups/` 사용. |
+| `FARM_NAS_HOST`, `FARM_NAS_PORT`, `FARM_NAS_USER` | FARM 컨테이너 생성 전 사용자 홈 디렉토리를 미리 만들 NAS SSH 접속 정보. |
+| `FARM_NAS_SSH_KEY` | FARM NAS 접속에 사용할 SSH private key. 생략 시 SSH 기본 키 사용. |
+| `FARM_NAS_USER_SHARE_ROOT` | FARM 서버의 `/home/takoN/share/user-share/` 에 대응하는 NAS 실제 경로. 기본값: `/volume1/share/user-share`. |
+| `FARM_NAS_SUDO` | NAS에서 `mkdir/chown/chmod` 앞에 붙일 명령. 기본값: `sudo -n`. root 계정 접속이면 빈 값으로 설정 가능. |
 | `EXPORT_DOMAINS` | export 기본 대상 도메인 CSV. 보통 `LAB,FARM`. |
 | `SERVER_DOMAIN` | `EXPORT_DOMAINS` 가 없을 때 일부 스크립트가 참고하는 fallback 도메인. 단일 도메인 운영 시 사용. |
 
@@ -509,6 +520,14 @@ ansible lab10 -i /home/jy/ansible/inventory.ini -m shell -a "docker ps"
 - `ansible_user` 의 `sudo` 없는 `docker` 명령 실행 가능.
 - GPU 컨테이너 생성에 필요한 Docker/NVIDIA runtime 준비.
 - create 스크립트는 `/home/tako서버번호/share/user-share/` 를 컨테이너 `/home/` 에 bind mount. 예: `LAB10` 은 `/home/tako10/share/user-share/` 사용.
+- FARM에서는 NAS root_squash 때문에 컨테이너 root가 신규 홈 디렉토리를 만들 수 없다. create 스크립트가 컨테이너 실행 전에 NAS에 raw Ansible SSH로 접속해 `FARM_NAS_USER_SHARE_ROOT/<username>` 을 UID/GID 소유로 미리 생성한다. LAB은 이 단계가 아직 적용되지 않는다.
+- FARM NAS SSH 계정은 `sudo -n mkdir/chown/chmod` 를 실행할 수 있어야 한다. 예:
+
+```sudoers
+User_Alias DECS_NAS_PROVISIONERS = jy, dongmin0204, hyrn268, uugaemi, suhyeon, garyoung
+DECS_NAS_PROVISIONERS ALL=(root) NOPASSWD: /usr/bin/mkdir -p /volume1/share/user-share/*, /usr/bin/chown [0-9]*\:[0-9]* /volume1/share/user-share/*, /usr/bin/chmod 750 /volume1/share/user-share/*
+```
+
 - Docker 이미지는 `dguailab/<image>:<version>` 형식으로 pull/inspect.
 
 ### 메일 설정
