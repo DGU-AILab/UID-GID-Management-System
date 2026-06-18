@@ -1,0 +1,155 @@
+---
+- name: Kerberized NFS parallel mount PoC
+  hosts: "{{ target_hosts | default('farm2') }}"
+  gather_facts: false
+  vars:
+    kerb_nfs_apply: false
+    kerb_nfs_install_packages: false
+    kerb_nfs_mount_point: /mnt/nas-krb-share
+    kerb_nfs_server_fqdn: nas.example.com
+    kerb_nfs_export: /volume1/share
+    kerb_nfs_sec: krb5p
+    kerb_nfs_mount_options: "vers=4.1,sec={{ kerb_nfs_sec }},hard,proto=tcp,_netdev"
+    kerb_realm: EXAMPLE.COM
+    kerb_kdc: kdc.example.com
+    kerb_admin_server: "{{ kerb_kdc }}"
+    kerb_domain: example.com
+
+  tasks:
+    - name: Validate required PoC variables are not placeholders
+      ansible.builtin.assert:
+        that:
+          - kerb_nfs_server_fqdn != 'nas.example.com'
+          - kerb_realm != 'EXAMPLE.COM'
+          - kerb_kdc != 'kdc.example.com'
+        fail_msg: >-
+          Set kerb_nfs_server_fqdn, kerb_realm, and kerb_kdc before running the
+          Kerberized NFS PoC. Run with kerb_nfs_apply=false first.
+      when: kerb_nfs_apply | bool
+
+    - name: Read current share mount
+      ansible.builtin.shell: "findmnt -T /home/tako2/share -o TARGET,SOURCE,FSTYPE,OPTIONS || true"
+      register: current_share_mount
+      changed_when: false
+
+    - name: Check Kerberos and NFS client commands
+      ansible.builtin.shell: |
+        set -eu
+        for command_name in kinit klist mount.nfs rpc.gssd; do
+          if command -v "$command_name" >/dev/null 2>&1; then
+            printf '%s=%s\n' "$command_name" "$(command -v "$command_name")"
+          else
+            printf '%s=MISSING\n' "$command_name"
+          fi
+        done
+      register: client_command_check
+      changed_when: false
+
+    - name: Check krb5.conf
+      ansible.builtin.shell: |
+        if [ -s /etc/krb5.conf ]; then
+          sed -n '1,120p' /etc/krb5.conf
+        else
+          echo "MISSING_OR_EMPTY"
+        fi
+      register: krb5_conf_check
+      changed_when: false
+
+    - name: Check NAS FQDN resolution
+      ansible.builtin.shell: "getent hosts {{ kerb_nfs_server_fqdn | quote }} || true"
+      register: nas_resolution_check
+      changed_when: false
+
+    - name: Print preflight summary
+      ansible.builtin.debug:
+        msg:
+          - "current_share_mount={{ current_share_mount.stdout_lines }}"
+          - "client_commands={{ client_command_check.stdout_lines }}"
+          - "krb5_conf={{ krb5_conf_check.stdout_lines }}"
+          - "nas_resolution={{ nas_resolution_check.stdout_lines }}"
+          - "apply={{ kerb_nfs_apply }}"
+
+    - name: Stop before changes when apply is false
+      ansible.builtin.meta: end_host
+      when: not kerb_nfs_apply | bool
+
+    - name: Install Kerberos/NFS client packages
+      become: true
+      ansible.builtin.apt:
+        name:
+          - krb5-user
+          - nfs-common
+        state: present
+        update_cache: true
+      when: kerb_nfs_install_packages | bool
+
+    - name: Write krb5.conf for PoC
+      become: true
+      ansible.builtin.copy:
+        dest: /etc/krb5.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [libdefaults]
+            default_realm = {{ kerb_realm }}
+            dns_lookup_realm = false
+            dns_lookup_kdc = false
+            rdns = false
+            ticket_lifetime = 24h
+            renew_lifetime = 7d
+            forwardable = true
+
+          [realms]
+            {{ kerb_realm }} = {
+              kdc = {{ kerb_kdc }}
+              admin_server = {{ kerb_admin_server }}
+            }
+
+          [domain_realm]
+            .{{ kerb_domain }} = {{ kerb_realm }}
+            {{ kerb_domain }} = {{ kerb_realm }}
+
+    - name: Ensure rpc-gssd is enabled
+      become: true
+      ansible.builtin.systemd:
+        name: rpc-gssd
+        enabled: true
+        state: started
+
+    - name: Create parallel Kerberized NFS mount point
+      become: true
+      ansible.builtin.file:
+        path: "{{ kerb_nfs_mount_point }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Mount NAS export with Kerberos security
+      become: true
+      ansible.builtin.shell: |
+        set -euo pipefail
+        if findmnt -T {{ kerb_nfs_mount_point | quote }} >/dev/null 2>&1; then
+          findmnt -T {{ kerb_nfs_mount_point | quote }} -o TARGET,SOURCE,FSTYPE,OPTIONS
+          exit 0
+        fi
+        mount -t nfs4 \
+          -o {{ kerb_nfs_mount_options | quote }} \
+          {{ (kerb_nfs_server_fqdn ~ ':' ~ kerb_nfs_export) | quote }} \
+          {{ kerb_nfs_mount_point | quote }}
+        findmnt -T {{ kerb_nfs_mount_point | quote }} -o TARGET,SOURCE,FSTYPE,OPTIONS
+      args:
+        executable: /bin/bash
+      register: kerb_mount_result
+      changed_when: "'TARGET' in kerb_mount_result.stdout"
+
+    - name: Verify mounted security option
+      ansible.builtin.shell: "findmnt -T {{ kerb_nfs_mount_point | quote }} -no OPTIONS"
+      register: mounted_options
+      changed_when: false
+      failed_when: "'sec=' ~ kerb_nfs_sec not in mounted_options.stdout"
+
+    - name: Print mount result
+      ansible.builtin.debug:
+        var: kerb_mount_result.stdout_lines
