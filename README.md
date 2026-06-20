@@ -528,6 +528,14 @@ User_Alias DECS_NAS_PROVISIONERS = jy, dongmin0204, hyrn268, uugaemi, suhyeon, g
 DECS_NAS_PROVISIONERS ALL=(root) NOPASSWD: /usr/bin/mkdir -p /volume1/share/user-share/*, /usr/bin/chown [0-9]*\:[0-9]* /volume1/share/user-share/*, /usr/bin/chmod 750 /volume1/share/user-share/*
 ```
 
+- Kerberized NFS는 아직 운영 mount가 아니라 PoC로 분리한다. 현재 확인된 범위는 farm2 Samba AD DC + Synology NAS `test_krb` 공유 + farm2 병렬 mount다.
+  - AD realm: `FARM.DECS.INTERNAL`
+  - AD DC: `dc1.farm.decs.internal` / `100.100.100.102`
+  - NAS test share: `nas.farm.decs.internal:/volume1/test_krb`
+  - 성공한 mount: `/mnt/nas-krb-test-v3`, `vers=3,sec=krb5p`
+  - NFSv4.1 `sec=krb5p`는 현재 Synology pseudo-root/export 처리에서 `access denied`로 남아 있다.
+  - 재현 절차와 rollback은 `docs/kerberized-nfs-poc/README.md` 참고.
+
 - Docker 이미지는 `dguailab/<image>:<version>` 형식으로 pull/inspect.
 
 ### 메일 설정
