@@ -5,12 +5,12 @@
   vars:
     kerb_nfs_apply: false
     kerb_nfs_install_packages: false
-    kerb_nfs_mount_point: /mnt/nas-krb-test-v3
+    kerb_nfs_mount_point: /mnt/nas-krb-test-v4
     kerb_nfs_server_fqdn: nas.example.com
     kerb_nfs_export: /volume1/test_krb
     kerb_nfs_sec: krb5p
     kerb_nfs_fstype: nfs
-    kerb_nfs_mount_options: "vers=3,sec={{ kerb_nfs_sec }},hard,proto=tcp,mountproto=tcp,_netdev"
+    kerb_nfs_mount_options: "vers=4.1,sec={{ kerb_nfs_sec }},hard,proto=tcp,_netdev"
     kerb_nfs_write_test: false
     kerb_nfs_write_test_file: farm2_krb5p_mount_test.txt
     kerb_realm: EXAMPLE.COM

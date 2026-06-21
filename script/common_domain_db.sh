@@ -279,11 +279,97 @@ run_remote_shell_capture() {
   printf '%s\n' "$output"
 }
 
+run_remote_raw_capture() {
+  local host="$1"
+  local port="$2"
+  local user="$3"
+  local key="$4"
+  local raw_command="$5"
+  local output
+  local ansible_args=()
+
+  ansible_args=(
+    "$host"
+    -i "${host},"
+    -u "$user"
+    -e "ansible_port=${port}"
+    -m raw
+    -a "$raw_command"
+  )
+
+  if [ -n "$key" ]; then
+    ansible_args+=(--private-key "$key")
+  fi
+
+  if ! output=$(ansible "${ansible_args[@]}" 2>&1); then
+    echo "$output" >&2
+    return 1
+  fi
+
+  printf '%s\n' "$output"
+}
+
 farm_nas_user_home_dir() {
   local username="$1"
   local share_root="${FARM_NAS_USER_SHARE_ROOT:-/volume1/share/user-share}"
   share_root="${share_root%/}"
   printf '%s/%s\n' "$share_root" "$username"
+}
+
+farm_kerberos_nas_user_home_dir() {
+  local username="$1"
+  local share_root="${FARM_KERBEROS_NAS_USER_SHARE_ROOT:-/volume1/test_krb/user-share}"
+  share_root="${share_root%/}"
+  printf '%s/%s\n' "$share_root" "$username"
+}
+
+farm_kerberos_mount_user_share_root() {
+  local share_root="${FARM_KERBEROS_MOUNT_USER_SHARE_ROOT:-/mnt/nas-krb-test-v4/user-share}"
+  share_root="${share_root%/}"
+  printf '%s\n' "$share_root"
+}
+
+farm_kerberos_ccache_dir() {
+  local uid="$1"
+  local ccache_base="${FARM_KERBEROS_CCACHE_BASE:-/run/user}"
+  ccache_base="${ccache_base%/}"
+  printf '%s/%s\n' "$ccache_base" "$uid"
+}
+
+farm_kerberos_ccache_file() {
+  local uid="$1"
+  printf '%s/krb5cc\n' "$(farm_kerberos_ccache_dir "$uid")"
+}
+
+farm_kerberos_realm() {
+  printf '%s\n' "${FARM_KERBEROS_REALM:-FARM.DECS.INTERNAL}"
+}
+
+farm_kerberos_principal() {
+  local username="$1"
+  printf '%s@%s\n' "$username" "$(farm_kerberos_realm)"
+}
+
+farm_kerberos_keytab_dir() {
+  local keytab_dir="${FARM_KERBEROS_KEYTAB_DIR:-/etc/decs-krb/keytabs}"
+  keytab_dir="${keytab_dir%/}"
+  printf '%s\n' "$keytab_dir"
+}
+
+farm_kerberos_keytab_file() {
+  local username="$1"
+  printf '%s/%s.keytab\n' "$(farm_kerberos_keytab_dir)" "$username"
+}
+
+farm_kerberos_refresh_env_dir() {
+  local env_dir="${FARM_KERBEROS_REFRESH_ENV_DIR:-/etc/decs-krb/refresh.d}"
+  env_dir="${env_dir%/}"
+  printf '%s\n' "$env_dir"
+}
+
+farm_kerberos_refresh_env_file() {
+  local username="$1"
+  printf '%s/%s.env\n' "$(farm_kerberos_refresh_env_dir)" "$username"
 }
 
 build_farm_nas_prepare_home_command() {
@@ -301,6 +387,264 @@ set -eu
 ${sudo_prefix} mkdir -p ${quoted_home}
 ${sudo_prefix} chown ${quoted_owner} ${quoted_home}
 ${sudo_prefix} chmod 750 ${quoted_home}
+EOF
+}
+
+build_farm_kerberos_keytab_command() {
+  local username="$1"
+  local principal="$2"
+  local keytab_file="$3"
+  local rotate_keytab="$4"
+  local uid="$5"
+  local gid="$6"
+  local sudo_prefix="${KERBEROS_REMOTE_SUDO:-sudo -n}"
+  local keytab_dir quoted_username quoted_principal quoted_keytab quoted_keytab_dir quoted_rotate quoted_home
+
+  keytab_dir="$(dirname "$keytab_file")"
+  quoted_username="$(shell_quote "$username")"
+  quoted_principal="$(shell_quote "$principal")"
+  quoted_keytab="$(shell_quote "$keytab_file")"
+  quoted_keytab_dir="$(shell_quote "$keytab_dir")"
+  quoted_rotate="$(shell_quote "$rotate_keytab")"
+  quoted_home="$(shell_quote "/home/$username")"
+
+  cat <<EOF
+set -eu
+username=${quoted_username}
+principal=${quoted_principal}
+keytab_file=${quoted_keytab}
+keytab_dir=${quoted_keytab_dir}
+rotate_keytab=${quoted_rotate}
+uid=${uid}
+gid=${gid}
+
+${sudo_prefix} install -d -o root -g root -m 0700 "\$keytab_dir"
+
+if ! ${sudo_prefix} samba-tool user show "\$username" >/dev/null 2>&1; then
+  new_password="Krb\$(date +%y%m%d)!\$(tr -dc A-Za-z0-9 </dev/urandom | head -c 24)"
+  ${sudo_prefix} samba-tool user create "\$username" "\$new_password" >/dev/null
+  ${sudo_prefix} samba-tool user setexpiry "\$username" --noexpiry >/dev/null 2>&1 || true
+elif [ "\$rotate_keytab" = "true" ]; then
+  new_password="Krb\$(date +%y%m%d)!\$(tr -dc A-Za-z0-9 </dev/urandom | head -c 24)"
+  ${sudo_prefix} samba-tool user setpassword "\$username" --newpassword="\$new_password" >/dev/null
+fi
+
+if ! ${sudo_prefix} samba-tool user show "\$username" | grep -q '^uidNumber:'; then
+  ${sudo_prefix} samba-tool user addunixattrs "\$username" "\$uid" --gid-number="\$gid" --unix-home=${quoted_home} --login-shell=/bin/bash --uid="\$username" >/dev/null
+fi
+
+tmp_keytab="\$(mktemp)"
+${sudo_prefix} samba-tool domain exportkeytab "\$tmp_keytab" --principal="\$principal" >/dev/null
+${sudo_prefix} chown root:root "\$tmp_keytab"
+${sudo_prefix} chmod 0400 "\$tmp_keytab"
+${sudo_prefix} mv "\$tmp_keytab" "\$keytab_file"
+${sudo_prefix} chown root:root "\$keytab_file"
+${sudo_prefix} chmod 0400 "\$keytab_file"
+${sudo_prefix} klist -kte "\$keytab_file" >/dev/null
+EOF
+}
+
+build_kerberos_host_refresh_command() {
+  local username="$1"
+  local uid="$2"
+  local gid="$3"
+  local principal="$4"
+  local keytab_file="$5"
+  local ccache_dir="$6"
+  local ccache_file="$7"
+  local refresh_env_file="$8"
+  local sudo_prefix="${KERBEROS_REMOTE_SUDO:-sudo -n}"
+  local refresh_env_dir refresh_interval
+  local quoted_refresh_env_dir quoted_ccache_dir quoted_refresh_env_file
+
+  refresh_env_dir="$(dirname "$refresh_env_file")"
+  refresh_interval="${FARM_KERBEROS_REFRESH_INTERVAL:-1h}"
+  quoted_refresh_env_dir="$(shell_quote "$refresh_env_dir")"
+  quoted_ccache_dir="$(shell_quote "$ccache_dir")"
+  quoted_refresh_env_file="$(shell_quote "$refresh_env_file")"
+
+  cat <<EOF
+set -eu
+username=$(shell_quote "$username")
+uid=$(shell_quote "$uid")
+gid=$(shell_quote "$gid")
+principal=$(shell_quote "$principal")
+keytab_file=$(shell_quote "$keytab_file")
+ccache_dir=$(shell_quote "$ccache_dir")
+ccache_file=$(shell_quote "$ccache_file")
+refresh_env_file=$(shell_quote "$refresh_env_file")
+
+${sudo_prefix} install -d -o root -g root -m 0755 /etc/decs-krb
+${sudo_prefix} install -d -o root -g root -m 0700 ${quoted_refresh_env_dir}
+${sudo_prefix} install -d -o "\$uid" -g "\$gid" -m 0700 ${quoted_ccache_dir}
+
+${sudo_prefix} tee /usr/local/sbin/decs-krb-refresh >/dev/null <<'DECS_KRB_REFRESH_SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+env_file="\${1:?refresh env file is required}"
+if [[ ! -f "\$env_file" ]]; then
+  echo "Missing Kerberos refresh env file: \$env_file" >&2
+  exit 1
+fi
+
+# shellcheck disable=SC1090
+source "\$env_file"
+
+: "\${DECS_KRB_PRINCIPAL:?}"
+: "\${DECS_KRB_KEYTAB:?}"
+: "\${DECS_KRB_CCACHE:?}"
+: "\${DECS_KRB_CCACHE_DIR:?}"
+: "\${DECS_KRB_UID:?}"
+: "\${DECS_KRB_GID:?}"
+
+ccache_path="\$DECS_KRB_CCACHE"
+if [[ "\$ccache_path" == FILE:* ]]; then
+  ccache_path="\${ccache_path#FILE:}"
+fi
+
+install -d -o "\$DECS_KRB_UID" -g "\$DECS_KRB_GID" -m 0700 "\$DECS_KRB_CCACHE_DIR"
+
+if klist -s -c "\$DECS_KRB_CCACHE" 2>/dev/null; then
+  if kinit -R -c "\$DECS_KRB_CCACHE" >/dev/null 2>&1; then
+    chown "\$DECS_KRB_UID:\$DECS_KRB_GID" "\$ccache_path"
+    chmod 0600 "\$ccache_path"
+    exit 0
+  fi
+fi
+
+kinit -k -t "\$DECS_KRB_KEYTAB" -c "\$DECS_KRB_CCACHE" "\$DECS_KRB_PRINCIPAL"
+chown "\$DECS_KRB_UID:\$DECS_KRB_GID" "\$ccache_path"
+chmod 0600 "\$ccache_path"
+DECS_KRB_REFRESH_SCRIPT
+${sudo_prefix} chmod 0755 /usr/local/sbin/decs-krb-refresh
+
+${sudo_prefix} tee ${quoted_refresh_env_file} >/dev/null <<DECS_KRB_REFRESH_ENV
+DECS_KRB_PRINCIPAL=$(shell_quote "$principal")
+DECS_KRB_KEYTAB=$(shell_quote "$keytab_file")
+DECS_KRB_CCACHE=$(shell_quote "FILE:$ccache_file")
+DECS_KRB_CCACHE_DIR=$(shell_quote "$ccache_dir")
+DECS_KRB_UID=$(shell_quote "$uid")
+DECS_KRB_GID=$(shell_quote "$gid")
+DECS_KRB_REFRESH_ENV
+${sudo_prefix} chown root:root ${quoted_refresh_env_file}
+${sudo_prefix} chmod 0600 ${quoted_refresh_env_file}
+
+${sudo_prefix} tee /etc/systemd/system/decs-krb-refresh@.service >/dev/null <<'DECS_KRB_REFRESH_SERVICE'
+[Unit]
+Description=Refresh DECS Kerberos credential cache for %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+DECS_KRB_REFRESH_SERVICE
+${sudo_prefix} tee -a /etc/systemd/system/decs-krb-refresh@.service >/dev/null <<DECS_KRB_REFRESH_SERVICE_PATH
+ExecStart=/usr/local/sbin/decs-krb-refresh ${refresh_env_dir}/%i.env
+DECS_KRB_REFRESH_SERVICE_PATH
+
+${sudo_prefix} tee /etc/systemd/system/decs-krb-refresh@.timer >/dev/null <<DECS_KRB_REFRESH_TIMER
+[Unit]
+Description=Refresh DECS Kerberos credential cache for %i
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=${refresh_interval}
+AccuracySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+DECS_KRB_REFRESH_TIMER
+
+instance="\$username"
+${sudo_prefix} systemctl daemon-reload
+${sudo_prefix} systemctl enable --now "decs-krb-refresh@\${instance}.timer" >/dev/null
+${sudo_prefix} systemctl start "decs-krb-refresh@\${instance}.service"
+EOF
+}
+
+build_farm_nas_lookup_ad_identity_command() {
+  local username="$1"
+  local netbios_domain="${FARM_KERBEROS_AD_NETBIOS:-FARM}"
+  local quoted_identity
+
+  quoted_identity="$(shell_quote "${netbios_domain}\\${username}")"
+
+  cat <<EOF
+set -eu
+wbinfo_bin=/usr/local/packages/@appstore/SMBService/usr/bin/wbinfo
+entry="\$("\$wbinfo_bin" -i ${quoted_identity})"
+printf '%s\n' "\$entry" | awk -F: '{ print \$3 " " \$4 }'
+EOF
+}
+
+build_farm_kerberos_prepare_home_command() {
+  local home_dir="$1"
+  local nas_uid="$2"
+  local nas_gid="$3"
+  local sudo_prefix="${FARM_NAS_SUDO-sudo -n}"
+  local quoted_home quoted_owner
+
+  quoted_home="$(shell_quote "$home_dir")"
+  quoted_owner="$(shell_quote "${nas_uid}:${nas_gid}")"
+
+  cat <<EOF
+set -eu
+${sudo_prefix} mkdir -p ${quoted_home}
+${sudo_prefix} chown ${quoted_owner} ${quoted_home}
+${sudo_prefix} chmod 750 ${quoted_home}
+EOF
+}
+
+build_kerberos_ccache_dir_command() {
+  local ccache_dir="$1"
+  local uid="$2"
+  local gid="$3"
+  local sudo_prefix="${KERBEROS_REMOTE_SUDO:-sudo -n}"
+  local quoted_dir quoted_owner
+
+  quoted_dir="$(shell_quote "$ccache_dir")"
+  quoted_owner="$(shell_quote "${uid}:${gid}")"
+
+  cat <<EOF
+set -eu
+${sudo_prefix} install -d -o ${uid} -g ${gid} -m 0700 ${quoted_dir}
+${sudo_prefix} chown ${quoted_owner} ${quoted_dir}
+${sudo_prefix} chmod 700 ${quoted_dir}
+EOF
+}
+
+build_kerberos_nfs_home_access_test_command() {
+  local mount_root="$1"
+  local username="$2"
+  local uid="$3"
+  local gid="$4"
+  local ccache_file="$5"
+  local sudo_prefix="${KERBEROS_REMOTE_SUDO:-sudo -n}"
+  local attempts="${FARM_KERBEROS_NFS_ACCESS_RETRIES:-12}"
+  local delay_seconds="${FARM_KERBEROS_NFS_ACCESS_RETRY_DELAY:-5}"
+  local home_dir test_file
+
+  mount_root="${mount_root%/}"
+  home_dir="${mount_root}/${username}"
+  test_file="${home_dir}/.decs_kerberos_access_check"
+
+  cat <<EOF
+set -eu
+command -v setpriv >/dev/null
+home_dir=$(shell_quote "$home_dir")
+test_file=$(shell_quote "$test_file")
+ccache=$(shell_quote "FILE:$ccache_file")
+for attempt in \$(seq 1 ${attempts}); do
+  if ${sudo_prefix} setpriv --reuid=${uid} --regid=${gid} --clear-groups env KRB5CCNAME="\$ccache" sh -c 'test -w "\$1" && printf access-check > "\$2" && rm -f "\$2"' _ "\$home_dir" "\$test_file"; then
+    echo "kerberos_nfs_access_ok attempt=\${attempt}"
+    exit 0
+  fi
+  sleep ${delay_seconds}
+done
+echo "kerberos_nfs_access_failed home=\${home_dir} uid=${uid} gid=${gid}" >&2
+exit 1
 EOF
 }
 
@@ -332,6 +676,115 @@ prepare_farm_nas_user_home() {
   fi
 
   ansible "${ansible_args[@]}"
+}
+
+lookup_farm_nas_ad_identity() {
+  local username="$1"
+  local nas_host="${FARM_NAS_HOST:-192.168.2.30}"
+  local nas_port="${FARM_NAS_PORT:-6954}"
+  local nas_user="${FARM_NAS_USER:-jy}"
+  local nas_key="${FARM_NAS_SSH_KEY:-}"
+  local raw_command output identity
+
+  raw_command="$(build_farm_nas_lookup_ad_identity_command "$username")"
+  output="$(run_remote_raw_capture "$nas_host" "$nas_port" "$nas_user" "$nas_key" "$raw_command")" || return 1
+  identity="$(printf '%s\n' "$output" | tr -d '\r' | awk '/^[0-9]+[[:space:]][0-9]+$/ { print $1 " " $2; found=1 } END { if (!found) exit 1 }')" || {
+    echo "Error: could not parse NAS AD identity for ${username}" >&2
+    echo "$output" >&2
+    return 1
+  }
+
+  printf '%s\n' "$identity"
+}
+
+lookup_farm_nas_ad_identity_with_retry() {
+  local username="$1"
+  local attempts="${FARM_KERBEROS_NAS_IDENTITY_RETRIES:-12}"
+  local delay_seconds="${FARM_KERBEROS_NAS_IDENTITY_RETRY_DELAY:-5}"
+  local attempt output
+
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if output="$(lookup_farm_nas_ad_identity "$username")"; then
+      printf '%s\n' "$output"
+      return 0
+    fi
+
+    if ((attempt < attempts)); then
+      log_event "KERBEROS" "waiting_for_nas_ad_identity username=${username} attempt=${attempt}/${attempts}"
+      sleep "$delay_seconds"
+    fi
+  done
+
+  return 1
+}
+
+prepare_farm_kerberos_nas_user_home() {
+  local username="$1"
+  local nas_uid="$2"
+  local nas_gid="$3"
+  local nas_host="${FARM_NAS_HOST:-192.168.2.30}"
+  local nas_port="${FARM_NAS_PORT:-6954}"
+  local nas_user="${FARM_NAS_USER:-jy}"
+  local nas_key="${FARM_NAS_SSH_KEY:-}"
+  local nas_home_dir raw_command
+
+  nas_home_dir="$(farm_kerberos_nas_user_home_dir "$username")"
+  raw_command="$(build_farm_kerberos_prepare_home_command "$nas_home_dir" "$nas_uid" "$nas_gid")"
+  run_remote_raw_capture "$nas_host" "$nas_port" "$nas_user" "$nas_key" "$raw_command"
+}
+
+prepare_remote_kerberos_ccache_dir() {
+  local host_alias="$1"
+  local uid="$2"
+  local gid="$3"
+  local ccache_dir raw_command
+
+  ccache_dir="$(farm_kerberos_ccache_dir "$uid")"
+  raw_command="$(build_kerberos_ccache_dir_command "$ccache_dir" "$uid" "$gid")"
+  run_remote_shell "$host_alias" "$raw_command"
+}
+
+ensure_farm_kerberos_keytab() {
+  local host_alias="$1"
+  local username="$2"
+  local principal="$3"
+  local keytab_file="$4"
+  local rotate_keytab="$5"
+  local uid="$6"
+  local gid="$7"
+  local raw_command
+
+  raw_command="$(build_farm_kerberos_keytab_command "$username" "$principal" "$keytab_file" "$rotate_keytab" "$uid" "$gid")"
+  run_remote_shell "$host_alias" "$raw_command"
+}
+
+install_farm_kerberos_host_refresh() {
+  local host_alias="$1"
+  local username="$2"
+  local uid="$3"
+  local gid="$4"
+  local principal="$5"
+  local keytab_file="$6"
+  local ccache_dir="$7"
+  local ccache_file="$8"
+  local refresh_env_file="$9"
+  local raw_command
+
+  raw_command="$(build_kerberos_host_refresh_command "$username" "$uid" "$gid" "$principal" "$keytab_file" "$ccache_dir" "$ccache_file" "$refresh_env_file")"
+  run_remote_shell "$host_alias" "$raw_command"
+}
+
+verify_remote_kerberos_nfs_home_access() {
+  local host_alias="$1"
+  local mount_root="$2"
+  local username="$3"
+  local uid="$4"
+  local gid="$5"
+  local ccache_file="$6"
+  local raw_command
+
+  raw_command="$(build_kerberos_nfs_home_access_test_command "$mount_root" "$username" "$uid" "$gid" "$ccache_file")"
+  run_remote_shell "$host_alias" "$raw_command"
 }
 
 backup_database_locally() {

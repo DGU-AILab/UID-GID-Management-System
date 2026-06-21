@@ -18,6 +18,8 @@ container_version=""
 container_name=""
 container_ports=""
 enable_vnc=false
+enable_kerberos=false
+rotate_kerberos_keytab=false
 created_by=""
 email=""
 phone=""
@@ -52,6 +54,10 @@ function show_help {
   echo "      --no-additional-ports       Skip additional port mappings"
   echo "      --enable-vnc true|false     Enable noVNC GUI access and map container port 6080"
   echo "      --enable_vnc true|false     Alias for --enable-vnc"
+  echo "      --enable-kerberos true|false"
+  echo "                                    Prepare FARM Kerberos NFS home and ccache mount"
+  echo "      --rotate-kerberos-keytab true|false"
+  echo "                                    Reset AD password and export a fresh host keytab"
   echo "  -c, --created-by CREATOR        Username of server manager"
   echo "      --email EMAIL               User email (required)"
   echo "      --phone PHONE               User phone (required)"
@@ -145,6 +151,36 @@ while [[ $# -gt 0 ]]; do
     esac
     shift 2
     ;;
+  --enable-kerberos | --enable_kerberos)
+    case "$2" in
+      true | TRUE | 1 | yes | YES | on | ON)
+        enable_kerberos=true
+        ;;
+      false | FALSE | 0 | no | NO | off | OFF)
+        enable_kerberos=false
+        ;;
+      *)
+        echo "Error: $1 must be true or false"
+        exit 1
+        ;;
+    esac
+    shift 2
+    ;;
+  --rotate-kerberos-keytab | --rotate_kerberos_keytab)
+    case "$2" in
+      true | TRUE | 1 | yes | YES | on | ON)
+        rotate_kerberos_keytab=true
+        ;;
+      false | FALSE | 0 | no | NO | off | OFF)
+        rotate_kerberos_keytab=false
+        ;;
+      *)
+        echo "Error: $1 must be true or false"
+        exit 1
+        ;;
+    esac
+    shift 2
+    ;;
   -c | --created-by)
     created_by="$2"
     shift 2
@@ -207,6 +243,10 @@ fi
 
 domain_name="$(normalize_domain_name "$domain_name")" || exit 1
 server_number="$(validate_server_number "$server_number")" || exit 1
+if [ "$enable_kerberos" = "true" ] && [ "$domain_name" != "FARM" ]; then
+  echo "Error: --enable-kerberos is currently supported only for FARM."
+  exit 1
+fi
 server_id="$(compose_server_id "$domain_name" "$server_number")"
 target_host="$(compose_ansible_host_alias "$domain_name" "$server_number")"
 db_host="$(resolve_db_host_for_domain "$domain_name")" || exit 1
@@ -313,6 +353,10 @@ echo "  Container Version: $container_version"
 echo "  Container Name: $container_name"
 echo "  Container Ports: $container_ports"
 echo "  Enable VNC: $enable_vnc"
+echo "  Enable Kerberos: $enable_kerberos"
+if [ "$enable_kerberos" = "true" ]; then
+  echo "  Rotate Kerberos keytab: $rotate_kerberos_keytab"
+fi
 echo "  Created By: $created_by"
 echo "  Email: $email"
 echo "  Phone: $phone"
@@ -385,7 +429,36 @@ fi
 
 farm_nas_home_dir=""
 if [ "$domain_name" = "FARM" ]; then
-  farm_nas_home_dir="$(farm_nas_user_home_dir "$username")"
+  if [ "$enable_kerberos" = "true" ]; then
+    farm_nas_home_dir="$(farm_kerberos_nas_user_home_dir "$username")"
+  else
+    farm_nas_home_dir="$(farm_nas_user_home_dir "$username")"
+  fi
+fi
+
+home_mount_source="/home/tako${server_number}/share/user-share/"
+kerberos_ccache_dir=""
+kerberos_ccache_file=""
+kerberos_principal=""
+kerberos_keytab_file=""
+kerberos_refresh_env_file=""
+kerberos_krb5_conf="${FARM_KERBEROS_KRB5_CONF:-/etc/krb5.conf}"
+kerberos_ad_dc_host="${FARM_KERBEROS_AD_DC_HOST:-farm2}"
+kerberos_docker_params=""
+
+if [ "$enable_kerberos" = "true" ]; then
+  if [ "$kerberos_ad_dc_host" != "$target_host" ]; then
+    echo "Error: --enable-kerberos keytab mode currently requires FARM_KERBEROS_AD_DC_HOST (${kerberos_ad_dc_host}) to match target host (${target_host})."
+    echo "Hint: for the current PoC, create Kerberos containers on ${kerberos_ad_dc_host}; cross-host keytab transfer is intentionally not automated yet."
+    exit 1
+  fi
+  home_mount_source="$(farm_kerberos_mount_user_share_root)/"
+  kerberos_ccache_dir="$(farm_kerberos_ccache_dir "$available_uid")"
+  kerberos_ccache_file="$(farm_kerberos_ccache_file "$available_uid")"
+  kerberos_principal="$(farm_kerberos_principal "$username")"
+  kerberos_keytab_file="$(farm_kerberos_keytab_file "$username")"
+  kerberos_refresh_env_file="$(farm_kerberos_refresh_env_file "$username")"
+  kerberos_docker_params=" --mount type=bind,source='${kerberos_ccache_dir}',target='${kerberos_ccache_dir}' --mount type=bind,source='${kerberos_krb5_conf}',target=/etc/krb5.conf,readonly -e KRB5CCNAME='FILE:${kerberos_ccache_file}' -e DECS_KERBEROS_ENABLED='true' -e DECS_KERBEROS_HOST_KEYTAB='true' -e DECS_KRB5_PRINCIPAL='${kerberos_principal}' -e KRB5_REALM='$(farm_kerberos_realm)'"
 fi
 
 function cleanup_and_exit {
@@ -466,6 +539,18 @@ if [ "$dry_run" = "true" ]; then
   if [ "$enable_vnc" = "true" ]; then
     echo "[DRY-RUN] VNC/noVNC will be enabled with ENABLE_VNC=true"
   fi
+  if [ "$enable_kerberos" = "true" ]; then
+    echo "[DRY-RUN] Kerberos NFS will be enabled"
+    echo "[DRY-RUN] Kerberos home mount source: ${home_mount_source}"
+    echo "[DRY-RUN] Kerberos NAS home: ${farm_nas_home_dir} (owner resolved from NAS AD mapping at apply time)"
+    echo "[DRY-RUN] Kerberos ccache dir: ${kerberos_ccache_dir}"
+    echo "[DRY-RUN] Kerberos ccache file: ${kerberos_ccache_file}"
+    echo "[DRY-RUN] Kerberos principal: ${kerberos_principal}"
+    echo "[DRY-RUN] Kerberos host keytab: ${kerberos_keytab_file} (root:root 0400 on ${target_host})"
+    echo "[DRY-RUN] Kerberos refresh env: ${kerberos_refresh_env_file} (root:root 0600 on ${target_host})"
+    echo "[DRY-RUN] Kerberos keytab rotation requested: ${rotate_kerberos_keytab}"
+    echo "[DRY-RUN] Kerberos krb5.conf bind source: ${kerberos_krb5_conf}"
+  fi
   if [ -n "$user_info" ]; then
     echo "[DRY-RUN] Existing user will be updated: ${username} (UID=${available_uid}, GID=${available_gid})"
   else
@@ -476,7 +561,7 @@ if [ "$dry_run" = "true" ]; then
   else
     echo "[DRY-RUN] New group will be created: ${groupname} (${available_gid})"
   fi
-  if [ "$domain_name" = "FARM" ]; then
+  if [ "$domain_name" = "FARM" ] && [ "$enable_kerberos" != "true" ]; then
     echo "[DRY-RUN] Would prepare FARM NAS home: ${farm_nas_home_dir} (${available_uid}:${available_gid})"
   fi
   echo "[DRY-RUN] Would run remote docker create on ${target_host}"
@@ -492,9 +577,38 @@ if ! run_remote_shell "$target_host" "docker image inspect dguailab/$container_i
 fi
 
 if [ "$domain_name" = "FARM" ]; then
-  echo "Preparing FARM NAS home ${farm_nas_home_dir} for ${username} (${available_uid}:${available_gid})..."
-  if ! prepare_farm_nas_user_home "$username" "$available_uid" "$available_gid"; then
-    cleanup_and_exit "Failed to prepare FARM NAS home for ${username}"
+  if [ "$enable_kerberos" = "true" ]; then
+    farm_nas_identity=""
+    echo "Ensuring FARM AD principal and host keytab for ${kerberos_principal} on ${kerberos_ad_dc_host}..."
+    if ! ensure_farm_kerberos_keytab "$kerberos_ad_dc_host" "$username" "$kerberos_principal" "$kerberos_keytab_file" "$rotate_kerberos_keytab" "$available_uid" "$available_gid"; then
+      cleanup_and_exit "Failed to prepare FARM Kerberos keytab for ${username}"
+    fi
+    echo "Resolving FARM NAS AD-mapped identity for ${username}..."
+    if ! farm_nas_identity="$(lookup_farm_nas_ad_identity_with_retry "$username")"; then
+      cleanup_and_exit "Failed to resolve FARM NAS AD identity for ${username}. Create the AD principal before enabling Kerberos."
+    fi
+    read -r farm_nas_kerberos_uid farm_nas_kerberos_gid <<<"$farm_nas_identity"
+    echo "Preparing FARM Kerberos NAS home ${farm_nas_home_dir} for ${username} (${farm_nas_kerberos_uid}:${farm_nas_kerberos_gid})..."
+    if ! prepare_farm_kerberos_nas_user_home "$username" "$farm_nas_kerberos_uid" "$farm_nas_kerberos_gid"; then
+      cleanup_and_exit "Failed to prepare FARM Kerberos NAS home for ${username}"
+    fi
+    echo "Preparing Kerberos credential cache directory ${kerberos_ccache_dir} on ${target_host}..."
+    if ! prepare_remote_kerberos_ccache_dir "$target_host" "$available_uid" "$available_gid"; then
+      cleanup_and_exit "Failed to prepare Kerberos credential cache directory for ${username}"
+    fi
+    echo "Installing Kerberos host refresh service for ${username} on ${target_host}..."
+    if ! install_farm_kerberos_host_refresh "$target_host" "$username" "$available_uid" "$available_gid" "$kerberos_principal" "$kerberos_keytab_file" "$kerberos_ccache_dir" "$kerberos_ccache_file" "$kerberos_refresh_env_file"; then
+      cleanup_and_exit "Failed to install Kerberos host refresh service for ${username}"
+    fi
+    echo "Verifying Kerberos NFS access for ${username} on ${target_host}..."
+    if ! verify_remote_kerberos_nfs_home_access "$target_host" "$(farm_kerberos_mount_user_share_root)" "$username" "$available_uid" "$available_gid" "$kerberos_ccache_file"; then
+      cleanup_and_exit "Kerberos NFS access check failed for ${username}. Synology NFS identity mapping may need refresh before container creation."
+    fi
+  else
+    echo "Preparing FARM NAS home ${farm_nas_home_dir} for ${username} (${available_uid}:${available_gid})..."
+    if ! prepare_farm_nas_user_home "$username" "$available_uid" "$available_gid"; then
+      cleanup_and_exit "Failed to prepare FARM NAS home for ${username}"
+    fi
   fi
 fi
 
@@ -505,7 +619,7 @@ if [ "$enable_vnc" = "true" ]; then
   vnc_env_params=" -e ENABLE_VNC='true' -e VNC_PASSWORD='${vnc_password}'"
 fi
 
-remote_run_command="docker run -dit --init --gpus device=all --memory=192g --memory-swap=192g ${port_params} --runtime=nvidia --cap-add=SYS_ADMIN --ipc=host --mount type=bind,source='/home/tako${server_number}/share/user-share/',target=/home/ --name '${container_name_param}' -e USER_ID='${username}' -e GID='${available_gid}' -e TARGET_GID='${available_gid}' -e USER_PW='${user_password}' -e USER_GROUP='${groupname}' -e UID='${available_uid}' -e TARGET_UID='${available_uid}'${vnc_env_params} -e NVIDIA_DRIVER_CAPABILITIES='compute,utility,graphics,display' dguailab/${container_image}:${container_version}"
+remote_run_command="docker run -dit --init --gpus device=all --memory=192g --memory-swap=192g ${port_params} --runtime=nvidia --cap-add=SYS_ADMIN --ipc=host --mount type=bind,source='${home_mount_source}',target=/home/${kerberos_docker_params} --name '${container_name_param}' -e USER_ID='${username}' -e GID='${available_gid}' -e TARGET_GID='${available_gid}' -e USER_PW='${user_password}' -e USER_GROUP='${groupname}' -e UID='${available_uid}' -e TARGET_UID='${available_uid}'${vnc_env_params} -e NVIDIA_DRIVER_CAPABILITIES='compute,utility,graphics,display' dguailab/${container_image}:${container_version}"
 container_output=$(run_remote_shell_capture "$target_host" "$remote_run_command") || cleanup_and_exit "Failed to create Docker container on ${target_host}"
 container_id=$(printf '%s\n' "$container_output" | tail -n1 | tr -d '\r')
 
