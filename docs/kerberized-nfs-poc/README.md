@@ -132,7 +132,8 @@ root/machine credential read/write: 성공
 컨테이너 내부 kinit + host /run/user/<uid>/krb5cc 공유 기반 read/write: 성공
 host root-only keytab + systemd refresh 기반 ccache 자동 발급/read/write: 성공
 신규 AD user 자동 생성 + keytab 발급: 성공
-신규 AD user Kerberos NFS write: 실패. principal/keytab/RFC2307 attrs/NAS wbinfo mapping은 정상이나 Synology NFS server가 신규 identity에 write 권한을 주지 않음.
+신규 AD user Kerberos NFS write: 성공. RFC2307 attrs만 있으면 실패했고, `msSFU30Name/msSFU30NisDomain` 추가 후 성공.
+신규 AD user cold create: NAS `wbinfo`와 account cache에는 즉시 보이지만 Synology NFS Kerberos owner mapping이 `svcgssd`/`idmapd` 재시작 전까지 갱신되지 않아 `Permission denied` 발생 가능. NAS Kerberos NFS 보조 데몬 재시작 후 실패 principal write 성공 확인.
 ```
 
 Synology는 Kerberos principal을 winbind AD-mapped UID/GID로 매핑한다. 따라서 Kerberos 모드의 NAS home owner는 컨테이너 UID/GID가 아니라 `wbinfo -i FARM\\<username>`으로 확인되는 NAS AD-mapped UID/GID여야 한다.
@@ -167,9 +168,16 @@ decs-krb-refresh@<username>.timer
 
 `decs-krb-refresh`는 기존 ticket이 있으면 `kinit -R`을 먼저 시도하고, 실패하거나 ccache가 없으면 `kinit -kt`로 새 ticket을 발급한다. 컨테이너에는 keytab을 mount하지 않고 `/run/user/<uid>` ccache directory만 공유한다.
 
+보안 제약:
+
+- 컨테이너 사용자가 root/sudo 권한을 가지면 `setuid`로 다른 UID를 가장할 수 있고, host `rpc.gssd`가 그 UID의 host ccache를 찾아 다른 사용자의 Kerberos NFS home에 접근할 수 있다.
+- 따라서 Kerberos 모드 이미지는 `DECS_DISABLE_USER_SUDO=true`를 지원해야 하며, create script는 Kerberos 모드에서 이 값을 전달한다.
+- 2026-06-21 테스트에서 passwordless sudo 제거 후 일반 사용자의 `sudo -n id`, `setpriv --reuid=<other_uid>`, cross-home write가 모두 실패했다.
+- local Ubuntu group만으로 Kerberos NFS group sharing을 기대하면 안 된다. `chmod 770`은 NAS에서 `FARM\Domain Users` group write가 되어 도메인 전체 write로 열릴 수 있다. Kerberos NFS group sharing은 별도 AD group/ACL 설계가 필요하다.
+
 keytab rotation은 `create_container.sh --enable-kerberos true --rotate-kerberos-keytab true`로 수행한다. 이 작업은 AD user password를 재설정하고 새 keytab을 export한다. 이미 발급된 ticket은 보통 ticket lifetime까지 유효하므로 유출 대응 시에는 ticket lifetime/renewable lifetime도 같이 조정해야 한다.
 
-신규 AD user는 `samba-tool user addunixattrs`로 `uidNumber`, `gidNumber`, `unixHomeDirectory`, `loginShell`을 추가한다. 다만 2026-06-21 테스트에서 Synology NAS는 신규 principal을 `wbinfo`/`id`로는 정상 인식하면서도 NFS Kerberos write는 거부했다. 기존에 NAS/NFS가 이미 인식하던 principal은 같은 keytab/ccache 구조로 write 성공한다. 따라서 create script는 실제 NFS write check를 통과해야만 컨테이너 생성과 DB 기록으로 넘어간다.
+신규 AD user는 `samba-tool user addunixattrs`로 `uidNumber`, `gidNumber`, `unixHomeDirectory`, `loginShell`을 추가하고, Samba Python API로 `msSFU30Name`, `msSFU30NisDomain`도 설정한다. 2026-06-21 테스트에서 Synology NAS는 `msSFU30*`가 없는 신규 principal을 `wbinfo`/`id`로는 정상 인식하면서도 NFS Kerberos write는 거부했다. 또한 신규 principal은 `wbinfo`에 보인 뒤에도 NFS GSS owner mapping cache가 바로 갱신되지 않아 `750` home owner write가 실패했다. NAS `svcgssd`/`idmapd` 재시작 후 같은 principal이 성공했으므로 create script는 NAS Kerberos NFS 보조 데몬을 refresh한 뒤 실제 NFS write check를 통과해야만 컨테이너 생성과 DB 기록으로 넘어간다.
 
 ## Rollback
 
@@ -184,8 +192,7 @@ sudo rmdir /mnt/nas-krb-test-v4
 
 ## 다음 단계
 
-1. Synology NFS server가 신규 AD Kerberos identity를 즉시 반영하도록 idmap/gssd/NFS cache flush 또는 안전한 service reload 방법 확인
-2. farm2 밖의 FARM host로 keytab을 안전하게 배포하는 방식 설계. 현재 PoC는 target host와 AD DC host가 같은 경우만 자동화한다.
-3. DB에 Kerberos secret이 아니라 `kerberos_enabled`, `principal`, `rotated_at` 같은 메타데이터만 남기는 schema 검토
-4. gssproxy 기반 운영 구조 검토
-5. k8s CSI/PV/PVC 구조로 확장
+1. farm2 밖의 FARM host로 keytab을 안전하게 배포하는 방식 설계. 현재 PoC는 target host와 AD DC host가 같은 경우만 자동화한다.
+2. DB에 Kerberos secret이 아니라 `kerberos_enabled`, `principal`, `rotated_at` 같은 메타데이터만 남기는 schema 검토
+3. gssproxy 기반 운영 구조 검토
+4. k8s CSI/PV/PVC 구조로 확장

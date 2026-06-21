@@ -458,7 +458,7 @@ if [ "$enable_kerberos" = "true" ]; then
   kerberos_principal="$(farm_kerberos_principal "$username")"
   kerberos_keytab_file="$(farm_kerberos_keytab_file "$username")"
   kerberos_refresh_env_file="$(farm_kerberos_refresh_env_file "$username")"
-  kerberos_docker_params=" --mount type=bind,source='${kerberos_ccache_dir}',target='${kerberos_ccache_dir}' --mount type=bind,source='${kerberos_krb5_conf}',target=/etc/krb5.conf,readonly -e KRB5CCNAME='FILE:${kerberos_ccache_file}' -e DECS_KERBEROS_ENABLED='true' -e DECS_KERBEROS_HOST_KEYTAB='true' -e DECS_KRB5_PRINCIPAL='${kerberos_principal}' -e KRB5_REALM='$(farm_kerberos_realm)'"
+  kerberos_docker_params=" --mount type=bind,source='${kerberos_ccache_dir}',target='${kerberos_ccache_dir}' --mount type=bind,source='${kerberos_krb5_conf}',target=/etc/krb5.conf,readonly -e KRB5CCNAME='FILE:${kerberos_ccache_file}' -e DECS_KERBEROS_ENABLED='true' -e DECS_KERBEROS_HOST_KEYTAB='true' -e DECS_DISABLE_USER_SUDO='true' -e DECS_KRB5_PRINCIPAL='${kerberos_principal}' -e KRB5_REALM='$(farm_kerberos_realm)'"
 fi
 
 function cleanup_and_exit {
@@ -591,6 +591,10 @@ if [ "$domain_name" = "FARM" ]; then
     echo "Preparing FARM Kerberos NAS home ${farm_nas_home_dir} for ${username} (${farm_nas_kerberos_uid}:${farm_nas_kerberos_gid})..."
     if ! prepare_farm_kerberos_nas_user_home "$username" "$farm_nas_kerberos_uid" "$farm_nas_kerberos_gid"; then
       cleanup_and_exit "Failed to prepare FARM Kerberos NAS home for ${username}"
+    fi
+    echo "Refreshing FARM NAS Kerberos NFS identity services..."
+    if ! restart_farm_kerberos_nas_gss_services; then
+      cleanup_and_exit "Failed to refresh FARM NAS Kerberos NFS identity services for ${username}"
     fi
     echo "Preparing Kerberos credential cache directory ${kerberos_ccache_dir} on ${target_host}..."
     if ! prepare_remote_kerberos_ccache_dir "$target_host" "$available_uid" "$available_gid"; then

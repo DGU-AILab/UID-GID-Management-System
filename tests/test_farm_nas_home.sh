@@ -125,6 +125,23 @@ test_kerberos_lookup_command() {
   assert_contains "$command" "awk -F:" "parse uid/gid"
 }
 
+test_kerberos_nas_gss_service_restart_command() {
+  FARM_NAS_SUDO="sudo -n"
+  FARM_KERBEROS_NAS_SVCGSSD="/usr/sbin/svcgssd"
+  FARM_KERBEROS_NAS_IDMAPD="/usr/sbin/idmapd"
+  FARM_KERBEROS_NAS_NFS_PRINCIPAL="nfs/nas.farm.decs.internal@FARM.DECS.INTERNAL"
+  local command
+  command="$(build_farm_kerberos_nas_gss_service_restart_command)"
+  assert_contains "$command" "svcgssd_bin='/usr/sbin/svcgssd'" "uses svcgssd path"
+  assert_contains "$command" "idmapd_bin='/usr/sbin/idmapd'" "uses idmapd path"
+  assert_contains "$command" "nfs_principal='nfs/nas.farm.decs.internal@FARM.DECS.INTERNAL'" "uses NFS principal"
+  assert_contains "$command" "kill \$(pidof svcgssd)" "restarts svcgssd"
+  assert_contains "$command" "\"\$svcgssd_bin\" -p \"\$nfs_principal\"" "starts svcgssd with principal"
+  assert_contains "$command" "kill \$(pidof idmapd)" "restarts idmapd"
+  assert_contains "$command" "\"\$idmapd_bin\"" "starts idmapd"
+  assert_contains "$command" "kerberos_nas_gss_services_restarted" "reports success"
+}
+
 test_kerberos_keytab_command() {
   KERBEROS_REMOTE_SUDO="sudo -n"
   local command
@@ -135,6 +152,9 @@ test_kerberos_keytab_command() {
   assert_contains "$command" "--gid-number=\"\$gid\"" "sets RFC2307 gid"
   assert_contains "$command" "--unix-home='/home/alice'" "sets RFC2307 home"
   assert_contains "$command" "--login-shell=/bin/bash" "sets RFC2307 shell"
+  assert_contains "$command" "DECS_KRB_NIS_DOMAIN=\"\$nis_domain\" python3" "sets msSFU attrs through Samba Python"
+  assert_contains "$command" 'message["msSFU30NisDomain"]' "sets msSFU NIS domain"
+  assert_contains "$command" 'message["msSFU30Name"]' "sets msSFU username"
   assert_contains "$command" "samba-tool domain exportkeytab" "exports keytab"
   assert_contains "$command" "--principal=\"\$principal\"" "exports requested principal"
   assert_contains "$command" "chmod 0400 \"\$keytab_file\"" "locks keytab permissions"
@@ -162,15 +182,18 @@ test_kerberos_host_refresh_command() {
 
 test_kerberos_nfs_access_test_command() {
   KERBEROS_REMOTE_SUDO="sudo -n"
+  FARM_KERBEROS_NFS_ACCESS_INITIAL_DELAY=7
   FARM_KERBEROS_NFS_ACCESS_RETRIES=3
   FARM_KERBEROS_NFS_ACCESS_RETRY_DELAY=2
   local command
   command="$(build_kerberos_nfs_home_access_test_command "/mnt/nas-krb-test-v4/user-share" "alice" 10123 10123 "/run/user/10123/krb5cc")"
   assert_contains "$command" "command -v setpriv" "requires setpriv"
+  assert_contains "$command" "sleep 7" "uses configured initial delay"
   assert_contains "$command" "for attempt in \$(seq 1 3)" "uses configured retry count"
   assert_contains "$command" "sleep 2" "uses configured retry delay"
   assert_contains "$command" "setpriv --reuid=10123 --regid=10123 --clear-groups" "runs as container UID"
   assert_contains "$command" "KRB5CCNAME=\"\$ccache\"" "passes ccache env"
+  assert_contains "$command" "printf access-check > \"\$1\" && rm -f \"\$1\"" "uses real write check"
   assert_contains "$command" "kerberos_nfs_access_ok" "reports success"
   assert_contains "$command" "kerberos_nfs_access_failed" "reports failure"
 }
@@ -241,6 +264,7 @@ test_prepare_command_without_sudo
 test_kerberos_prepare_home_command
 test_kerberos_ccache_command
 test_kerberos_lookup_command
+test_kerberos_nas_gss_service_restart_command
 test_kerberos_keytab_command
 test_kerberos_host_refresh_command
 test_kerberos_nfs_access_test_command

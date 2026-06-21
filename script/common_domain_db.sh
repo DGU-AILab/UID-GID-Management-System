@@ -398,7 +398,8 @@ build_farm_kerberos_keytab_command() {
   local uid="$5"
   local gid="$6"
   local sudo_prefix="${KERBEROS_REMOTE_SUDO:-sudo -n}"
-  local keytab_dir quoted_username quoted_principal quoted_keytab quoted_keytab_dir quoted_rotate quoted_home
+  local nis_domain="${FARM_KERBEROS_NIS_DOMAIN:-farm}"
+  local keytab_dir quoted_username quoted_principal quoted_keytab quoted_keytab_dir quoted_rotate quoted_home quoted_nis_domain
 
   keytab_dir="$(dirname "$keytab_file")"
   quoted_username="$(shell_quote "$username")"
@@ -407,6 +408,7 @@ build_farm_kerberos_keytab_command() {
   quoted_keytab_dir="$(shell_quote "$keytab_dir")"
   quoted_rotate="$(shell_quote "$rotate_keytab")"
   quoted_home="$(shell_quote "/home/$username")"
+  quoted_nis_domain="$(shell_quote "$nis_domain")"
 
   cat <<EOF
 set -eu
@@ -417,6 +419,7 @@ keytab_dir=${quoted_keytab_dir}
 rotate_keytab=${quoted_rotate}
 uid=${uid}
 gid=${gid}
+nis_domain=${quoted_nis_domain}
 
 ${sudo_prefix} install -d -o root -g root -m 0700 "\$keytab_dir"
 
@@ -432,6 +435,30 @@ fi
 if ! ${sudo_prefix} samba-tool user show "\$username" | grep -q '^uidNumber:'; then
   ${sudo_prefix} samba-tool user addunixattrs "\$username" "\$uid" --gid-number="\$gid" --unix-home=${quoted_home} --login-shell=/bin/bash --uid="\$username" >/dev/null
 fi
+
+${sudo_prefix} env DECS_KRB_USERNAME="\$username" DECS_KRB_NIS_DOMAIN="\$nis_domain" python3 - <<'PY'
+import os
+
+from samba.auth import system_session
+from samba.param import LoadParm
+from samba.samdb import SamDB
+from ldb import FLAG_MOD_REPLACE, Message, MessageElement
+
+username = os.environ["DECS_KRB_USERNAME"]
+nis_domain = os.environ["DECS_KRB_NIS_DOMAIN"]
+
+lp = LoadParm()
+lp.load_default()
+samdb = SamDB(url="/var/lib/samba/private/sam.ldb", session_info=system_session(), lp=lp)
+result = samdb.search(expression=f"(sAMAccountName={username})", attrs=["distinguishedName"])
+if not result:
+    raise SystemExit(f"AD user not found: {username}")
+
+message = Message(result[0].dn)
+message["msSFU30NisDomain"] = MessageElement(nis_domain, FLAG_MOD_REPLACE, "msSFU30NisDomain")
+message["msSFU30Name"] = MessageElement(username, FLAG_MOD_REPLACE, "msSFU30Name")
+samdb.modify(message)
+PY
 
 tmp_keytab="\$(mktemp)"
 ${sudo_prefix} samba-tool domain exportkeytab "\$tmp_keytab" --principal="\$principal" >/dev/null
@@ -624,6 +651,7 @@ build_kerberos_nfs_home_access_test_command() {
   local sudo_prefix="${KERBEROS_REMOTE_SUDO:-sudo -n}"
   local attempts="${FARM_KERBEROS_NFS_ACCESS_RETRIES:-12}"
   local delay_seconds="${FARM_KERBEROS_NFS_ACCESS_RETRY_DELAY:-5}"
+  local initial_delay_seconds="${FARM_KERBEROS_NFS_ACCESS_INITIAL_DELAY:-30}"
   local home_dir test_file
 
   mount_root="${mount_root%/}"
@@ -636,8 +664,11 @@ command -v setpriv >/dev/null
 home_dir=$(shell_quote "$home_dir")
 test_file=$(shell_quote "$test_file")
 ccache=$(shell_quote "FILE:$ccache_file")
+if [ "${initial_delay_seconds}" -gt 0 ]; then
+  sleep ${initial_delay_seconds}
+fi
 for attempt in \$(seq 1 ${attempts}); do
-  if ${sudo_prefix} setpriv --reuid=${uid} --regid=${gid} --clear-groups env KRB5CCNAME="\$ccache" sh -c 'test -w "\$1" && printf access-check > "\$2" && rm -f "\$2"' _ "\$home_dir" "\$test_file"; then
+  if ${sudo_prefix} setpriv --reuid=${uid} --regid=${gid} --clear-groups env KRB5CCNAME="\$ccache" sh -c 'printf access-check > "\$1" && rm -f "\$1"' _ "\$test_file"; then
     echo "kerberos_nfs_access_ok attempt=\${attempt}"
     exit 0
   fi
@@ -730,6 +761,57 @@ prepare_farm_kerberos_nas_user_home() {
 
   nas_home_dir="$(farm_kerberos_nas_user_home_dir "$username")"
   raw_command="$(build_farm_kerberos_prepare_home_command "$nas_home_dir" "$nas_uid" "$nas_gid")"
+  run_remote_raw_capture "$nas_host" "$nas_port" "$nas_user" "$nas_key" "$raw_command"
+}
+
+build_farm_kerberos_nas_gss_service_restart_command() {
+  local sudo_prefix="${FARM_NAS_SUDO-sudo -n}"
+  local svcgssd_bin="${FARM_KERBEROS_NAS_SVCGSSD:-/usr/sbin/svcgssd}"
+  local idmapd_bin="${FARM_KERBEROS_NAS_IDMAPD:-/usr/sbin/idmapd}"
+  local nfs_principal="${FARM_KERBEROS_NAS_NFS_PRINCIPAL:-nfs/nas.farm.decs.internal@FARM.DECS.INTERNAL}"
+
+  cat <<EOF
+set -eu
+svcgssd_bin=$(shell_quote "$svcgssd_bin")
+idmapd_bin=$(shell_quote "$idmapd_bin")
+nfs_principal=$(shell_quote "$nfs_principal")
+
+if [ -n "\$(pidof svcgssd 2>/dev/null || true)" ]; then
+  ${sudo_prefix} kill \$(pidof svcgssd)
+  sleep 1
+fi
+${sudo_prefix} "\$svcgssd_bin" -p "\$nfs_principal"
+
+if [ -n "\$(pidof idmapd 2>/dev/null || true)" ]; then
+  ${sudo_prefix} kill \$(pidof idmapd)
+  sleep 1
+fi
+${sudo_prefix} "\$idmapd_bin"
+
+sleep 1
+pidof svcgssd >/dev/null
+pidof idmapd >/dev/null
+echo "kerberos_nas_gss_services_restarted"
+EOF
+}
+
+restart_farm_kerberos_nas_gss_services() {
+  local nas_host="${FARM_NAS_HOST:-192.168.2.30}"
+  local nas_port="${FARM_NAS_PORT:-6954}"
+  local nas_user="${FARM_NAS_USER:-jy}"
+  local nas_key="${FARM_NAS_SSH_KEY:-}"
+  local enabled="${FARM_KERBEROS_NAS_RESTART_GSS_SERVICES:-true}"
+  local raw_command
+
+  case "$enabled" in
+  true | TRUE | 1 | yes | YES | on | ON)
+    ;;
+  *)
+    return 0
+    ;;
+  esac
+
+  raw_command="$(build_farm_kerberos_nas_gss_service_restart_command)"
   run_remote_raw_capture "$nas_host" "$nas_port" "$nas_user" "$nas_key" "$raw_command"
 }
 
