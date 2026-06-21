@@ -28,6 +28,8 @@ server_id_input=""
 dry_run=false
 user_password=""
 vnc_password=""
+supplemental_group_specs=""
+supplemental_docker_params=""
 
 generate_password() {
   local length="$1"
@@ -262,6 +264,8 @@ if ! mysql_exec -e "SELECT 1;" >/dev/null 2>&1; then
   exit 1
 fi
 
+ensure_group_membership_schema || exit 1
+
 if [ -z "$container_expiration_date" ]; then
   read -p "Container expiration date (YYYY-MM-DD): " container_expiration_date
 fi
@@ -303,6 +307,8 @@ done
 if [ -z "$note" ]; then
   read -p "Note: " note
 fi
+
+validate_identity_name "$username" "username" || exit 1
 
 if [ -z "$user_password" ]; then
   user_password="$(generate_password 12)"
@@ -393,7 +399,8 @@ echo "Using Jupyter port: $available_jupyter_port"
 available_ports=("${available_ports[@]:2}")
 
 uid_base=10000
-user_info=$(mysql_exec -N -e "SELECT ubuntu_uid FROM user WHERE ubuntu_username='$username';")
+sql_username="$(sql_escape "$username")"
+user_info=$(mysql_exec -N -e "SELECT ubuntu_uid FROM user WHERE ubuntu_username='${sql_username}';")
 
 if [ -n "$user_info" ]; then
   available_uid=$user_info
@@ -412,18 +419,51 @@ if [ -z "$groupname" ]; then
   groupname=$username
 fi
 
-group_info=$(mysql_exec -N -e "SELECT ubuntu_gid FROM \`group\` WHERE ubuntu_groupname='$groupname';")
+validate_identity_name "$groupname" "group name" || exit 1
+
+sql_groupname="$(sql_escape "$groupname")"
+group_info=$(mysql_exec -N -e "SELECT ubuntu_gid FROM \`group\` WHERE ubuntu_groupname='${sql_groupname}';")
 
 if [ -n "$group_info" ]; then
   available_gid=$group_info
   echo "Reusing existing GID: $available_gid for group $groupname"
 else
   if [ "$groupname" != "$username" ]; then
-    available_gid=$((available_uid + 1))
+    max_id_for_group=$(mysql_exec -N -e "SELECT COALESCE(MAX(id), $((uid_base - 1))) FROM used_ids;")
+    if [ "$max_id_for_group" -lt "$uid_base" ]; then
+      available_gid=$uid_base
+    else
+      available_gid=$((max_id_for_group + 1))
+    fi
+    if [ "$available_gid" -eq "$available_uid" ]; then
+      available_gid=$((available_gid + 1))
+    fi
     echo "Using new GID: $available_gid for group $groupname"
   else
     available_gid=$available_uid
     echo "Using GID with same value as UID: $available_gid for group $groupname"
+  fi
+fi
+
+if [ -n "$user_info" ]; then
+  supplemental_group_rows=$(mysql_exec -N -B -e "
+    SELECT g.ubuntu_groupname, g.ubuntu_gid
+    FROM user_group_membership ugm
+    JOIN user u ON u.ubuntu_uid = ugm.ubuntu_uid
+    JOIN \`group\` g ON g.ubuntu_gid = ugm.ubuntu_gid
+    WHERE u.ubuntu_username = '${sql_username}'
+      AND g.ubuntu_gid <> ${available_gid}
+    ORDER BY g.ubuntu_groupname;
+  ")
+  if [ -n "$supplemental_group_rows" ]; then
+    while IFS=$'\t' read -r supplemental_group_name supplemental_group_gid; do
+      [ -n "$supplemental_group_name" ] || continue
+      if [ -n "$supplemental_group_specs" ]; then
+        supplemental_group_specs+=","
+      fi
+      supplemental_group_specs+="${supplemental_group_name}:${supplemental_group_gid}"
+    done <<<"$supplemental_group_rows"
+    supplemental_docker_params=" -e DECS_SUPPLEMENTAL_GROUPS='${supplemental_group_specs}'"
   fi
 fi
 
@@ -554,6 +594,9 @@ if [ "$dry_run" = "true" ]; then
       echo "[DRY-RUN] Kerberos AD group will be ensured: ${groupname} (gidNumber=${available_gid})"
       echo "[DRY-RUN] Kerberos AD membership will include: ${username} -> ${groupname}"
     fi
+    if [ -n "$supplemental_group_specs" ]; then
+      echo "[DRY-RUN] Kerberos supplemental groups passed to container: ${supplemental_group_specs}"
+    fi
   fi
   if [ -n "$user_info" ]; then
     echo "[DRY-RUN] Existing user will be updated: ${username} (UID=${available_uid}, GID=${available_gid})"
@@ -627,7 +670,7 @@ if [ "$enable_vnc" = "true" ]; then
   vnc_env_params=" -e ENABLE_VNC='true' -e VNC_PASSWORD='${vnc_password}'"
 fi
 
-remote_run_command="docker run -dit --init --gpus device=all --memory=192g --memory-swap=192g ${port_params} --runtime=nvidia --cap-add=SYS_ADMIN --ipc=host --mount type=bind,source='${home_mount_source}',target=/home/${kerberos_docker_params} --name '${container_name_param}' -e USER_ID='${username}' -e GID='${available_gid}' -e TARGET_GID='${available_gid}' -e USER_PW='${user_password}' -e USER_GROUP='${groupname}' -e UID='${available_uid}' -e TARGET_UID='${available_uid}'${vnc_env_params} -e NVIDIA_DRIVER_CAPABILITIES='compute,utility,graphics,display' dguailab/${container_image}:${container_version}"
+remote_run_command="docker run -dit --init --gpus device=all --memory=192g --memory-swap=192g ${port_params} --runtime=nvidia --cap-add=SYS_ADMIN --ipc=host --mount type=bind,source='${home_mount_source}',target=/home/${kerberos_docker_params} --name '${container_name_param}' -e USER_ID='${username}' -e GID='${available_gid}' -e TARGET_GID='${available_gid}' -e USER_PW='${user_password}' -e USER_GROUP='${groupname}' -e UID='${available_uid}' -e TARGET_UID='${available_uid}'${supplemental_docker_params}${vnc_env_params} -e NVIDIA_DRIVER_CAPABILITIES='compute,utility,graphics,display' dguailab/${container_image}:${container_version}"
 container_output=$(run_remote_shell_capture "$target_host" "$remote_run_command") || cleanup_and_exit "Failed to create Docker container on ${target_host}"
 container_id=$(printf '%s\n' "$container_output" | tail -n1 | tr -d '\r')
 
@@ -695,7 +738,7 @@ done
 if [ -n "$groupname" ] && [ -z "$group_info" ]; then
   group_result=$(mysql_exec -N -s -e "
     INSERT INTO \`group\` (ubuntu_groupname, ubuntu_gid)
-    VALUES ('$groupname', $available_gid);
+    VALUES ('${sql_groupname}', $available_gid);
     SELECT ROW_COUNT();")
 
   if [ -z "$group_result" ] || [ "$group_result" -ne 1 ]; then

@@ -83,6 +83,7 @@ bash script/create_container.sh \
 - `--enable-vnc true` 또는 `--enable_vnc true`: 컨테이너 내부 `6080` 포트 추가 매핑, Docker 환경변수 `ENABLE_VNC=true` 전달. 외부 포트는 기존 포트 배정 방식으로 자동 선택.
 - `--enable-kerberos true` 또는 `--enable_kerberos true`: FARM 전용. AD principal/keytab, Kerberized NFS mount source, host ccache directory, `KRB5CCNAME`, `/etc/krb5.conf` bind mount를 준비한다. keytab은 target host root-only secret으로만 보관하고 컨테이너에는 ccache만 공유한다.
 - `--rotate-kerberos-keytab true` 또는 `--rotate_kerberos_keytab true`: 기존 AD user password를 재설정하고 새 keytab을 export한다. 기존 ticket은 만료 시각까지 유효할 수 있으므로 유출 대응 시 ticket lifetime도 함께 고려한다.
+- FARM Kerberos 모드에서 `--group groupA`를 지정하면 create script가 DB group뿐 아니라 AD group `groupA`의 `gidNumber/msSFU30*`와 user membership도 자동으로 보장한다. 이후 컨테이너 내부의 primary group도 `groupA`가 된다.
 - `--user-password` 생략 시 12자리 영문/숫자 초기 Ubuntu 비밀번호 자동 생성.
 - `--vnc-password` 생략 + VNC 활성화 시 8자리 영문/숫자 초기 VNC 비밀번호 자동 생성. VNC 비밀번호는 최대 8자.
 
@@ -92,7 +93,7 @@ bash script/create_container.sh \
 2. `LAB_DB_HOST` 또는 `FARM_DB_HOST` 로 DB host 결정. `ANSIBLE_INVENTORY` 안의 `lab10` / `farmN` alias 확인.
 3. 관리 서버에서 MySQL 접속 확인. dry-run도 DB 읽기 필요.
 4. DB의 `used_ports` 조회 후 포트 배정. 서버 번호 `N` 의 포트 블록은 `9000 + 100 * (N - 1)` 부터 `9000 + 100 * N - 1` 까지. SSH `22`, Jupyter `8888` 에 외부 포트 2개 우선 배정. VNC와 추가 포트는 남은 포트 순차 배정.
-5. DB의 `user`, `group`, `used_ids` 조회 후 UID/GID 결정. 기존 username은 UID 재사용. 신규 username은 `used_ids` 최댓값 다음 번호 사용. group이 비어 있으면 username을 group으로 사용.
+5. DB의 `user`, `group`, `used_ids`, `user_group_membership` 조회 후 UID/GID 결정. 기존 username은 UID 재사용. 신규 username은 `used_ids` 최댓값 다음 번호 사용. group이 비어 있으면 username을 group으로 사용. 기존 user의 supplemental group은 컨테이너에 `DECS_SUPPLEMENTAL_GROUPS`로 전달한다.
 6. `--dry-run` 인 경우 원격 Docker 실행, FARM NAS 홈 생성, DB 쓰기, 백업, export, 메일 발송 없이 계획만 출력 후 종료.
 7. 대상 서버에서 Ansible shell로 `docker image inspect dguailab/<image>:<version>` 실행. 이미지가 없으면 `docker pull`.
 8. FARM Kerberos 모드면 AD principal을 확인/생성하고 target host에 사용자별 keytab을 `root:root 0400`으로 export한다. `--group`이 username과 다르면 같은 이름의 AD group을 만들거나 갱신하고, `gidNumber/msSFU30*`와 user membership도 보장한다. `--rotate-kerberos-keytab true`면 AD password를 재설정한 뒤 keytab을 새로 export한다.
@@ -101,7 +102,7 @@ bash script/create_container.sh \
 11. FARM Kerberos 모드면 target host에 `/usr/local/sbin/decs-krb-refresh`, `decs-krb-refresh@<username>.timer`, root-only refresh env를 설치하고 `/run/user/<uid>/krb5cc` ticket을 `kinit -kt`로 발급한다.
 12. FARM Kerberos 모드면 target host에서 실제 NFS home write check를 수행한다. 이 단계가 실패하면 DB/container 생성 전에 중단한다.
 13. DB transaction 시작.
-14. 대상 서버에서 Ansible shell로 `docker run -dit ...` 실행. 주요 옵션: GPU 전체 사용, 메모리 `192g`, `--runtime=nvidia`, `/home/takoN/share/user-share/` 또는 Kerberos mount root bind mount, `USER_ID`, `UID`, `TARGET_UID`, `GID`, `TARGET_GID`, `USER_PW`, `USER_GROUP` 환경변수 전달. Kerberos 모드에서는 `DECS_USER_SUDO_MODE=restricted`도 전달해 package install용 sudo는 남기고 UID spoofing으로 이어지는 root 실행 경로를 막는다.
+14. 대상 서버에서 Ansible shell로 `docker run -dit ...` 실행. 주요 옵션: GPU 전체 사용, 메모리 `192g`, `--runtime=nvidia`, `/home/takoN/share/user-share/` 또는 Kerberos mount root bind mount, `USER_ID`, `UID`, `TARGET_UID`, `GID`, `TARGET_GID`, `USER_PW`, `USER_GROUP` 환경변수 전달. Kerberos 모드에서는 `DECS_USER_SUDO_MODE=restricted`도 전달해 package install용 sudo는 남기고 UID spoofing으로 이어지는 root 실행 경로를 막는다. 기존 user에게 supplemental group membership이 있으면 `DECS_SUPPLEMENTAL_GROUPS=groupA:gid,groupB:gid`도 전달한다.
 15. 생성된 container id 형식 확인. `docker inspect` 와 `docker port` 로 컨테이너와 SSH 포트 바인딩 검증.
 16. 같은 transaction 안에서 `used_ids`, `used_ports`, `group`, `user`, `docker_container` 기록. `used_ports.docker_container_record_id` 를 새 `docker_container.id` 로 연결.
 17. DB transaction commit.
@@ -114,6 +115,28 @@ bash script/create_container.sh \
 - transaction 시작 후 실패 시 DB rollback 시도.
 - 원격 Docker 컨테이너 생성 후 DB 기록/검증 실패 시 `docker rm -f` 로 방금 만든 컨테이너 제거 후 rollback.
 - commit 이후 메일, 백업, export 실패는 생성 자체 rollback 대상 아님. 메일 실패는 로그 기록, 백업 실패는 무시 후 진행.
+
+### Kerberos 그룹 관리
+
+FARM Kerberos group sharing은 `script/manage_group.sh`로 관리한다. 이 스크립트는 UID DB의 `group` / `user_group_membership`과 Samba AD group/member를 같이 맞춘다.
+
+```bash
+bash script/manage_group.sh ensure --group project_a
+bash script/manage_group.sh add-user --group project_a --user alice
+bash script/manage_group.sh add-user --group project_a --users alice,bob
+bash script/manage_group.sh remove-user --group project_a --user alice
+bash script/manage_group.sh set-primary --group project_a --user alice
+bash script/manage_group.sh show --group project_a
+bash script/manage_group.sh delete --group project_a --force
+```
+
+- `ensure`: DB group을 만들고 FARM AD group의 `gidNumber/msSFU30*`를 보장한다.
+- `add-user`: AD group member를 추가하고 DB supplemental membership을 기록한다. 다음 컨테이너 생성/재생성 때 `DECS_SUPPLEMENTAL_GROUPS`로 컨테이너 local group에도 반영된다.
+- `set-primary`: 사용자의 primary DB group을 바꾸고 AD membership도 보장한다.
+- `remove-user`: supplemental membership만 제거한다. primary group은 먼저 다른 group으로 바꿔야 제거할 수 있다.
+- `delete`: primary user가 없는 group만 삭제한다. supplemental membership이 남아 있으면 `--force`가 필요하다.
+
+사용자는 컨테이너 안에서 `decs-share ~/sharing_dir project_a`를 실행해 자기 home 내부 디렉토리를 직접 공유한다.
 
 ### 2. 컨테이너 삭제
 

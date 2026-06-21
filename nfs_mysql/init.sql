@@ -33,6 +33,18 @@ CREATE TABLE
         FOREIGN KEY (ubuntu_gid) REFERENCES `group` (ubuntu_gid)
     ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
 
+-- Create supplemental group membership table
+CREATE TABLE
+    user_group_membership (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        ubuntu_uid INT NOT NULL,
+        ubuntu_gid INT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_user_group_membership (ubuntu_uid, ubuntu_gid),
+        FOREIGN KEY (ubuntu_uid) REFERENCES user (ubuntu_uid),
+        FOREIGN KEY (ubuntu_gid) REFERENCES `group` (ubuntu_gid)
+    ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
+
 -- Create docker_container table
 CREATE TABLE
     docker_container (

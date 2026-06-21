@@ -182,12 +182,16 @@ decs-krb-refresh@<username>.timer
   create_container.sh --enable-kerberos true --group groupA ...
   -> AD groupA 생성/갱신, gidNumber/msSFU30* 설정, user membership 추가
 
+  또는
+  manage_group.sh add-user --group groupA --user userA
+  -> DB supplemental membership + AD group member 추가
+
 사용자:
   decs-share ~/sharing_dir groupA
   -> 사용자 권한으로 mkdir, chgrp groupA, chmod 2770 수행
 ```
 
-관리자는 공유 디렉토리를 만들지 않는다. 사용자가 자기 home 안에서 원하는 디렉토리를 만들고, 자신이 속한 AD group으로 직접 공유한다. restricted sudo는 `sudo chgrp/chmod/chown`만 막고 일반 사용자 권한의 `chgrp/chmod`는 허용하므로 이 흐름과 충돌하지 않는다.
+관리자는 공유 디렉토리를 만들지 않는다. 사용자가 자기 home 안에서 원하는 디렉토리를 만들고, 자신이 속한 AD group으로 직접 공유한다. restricted sudo는 `sudo chgrp/chmod/chown`만 막고 일반 사용자 권한의 `chgrp/chmod`는 허용하므로 이 흐름과 충돌하지 않는다. `manage_group.sh`로 추가한 supplemental group은 다음 컨테이너 생성/재생성 때 `DECS_SUPPLEMENTAL_GROUPS`로 컨테이너 local group에 반영된다.
 
 keytab rotation은 `create_container.sh --enable-kerberos true --rotate-kerberos-keytab true`로 수행한다. 이 작업은 AD user password를 재설정하고 새 keytab을 export한다. 이미 발급된 ticket은 보통 ticket lifetime까지 유효하므로 유출 대응 시에는 ticket lifetime/renewable lifetime도 같이 조정해야 한다.
 

@@ -36,6 +36,14 @@ assert_not_contains() {
 test_shell_quote() {
   assert_eq "'simple'" "$(shell_quote "simple")" "simple quote"
   assert_eq "'a'\''b'" "$(shell_quote "a'b")" "single quote escaping"
+  assert_eq "a''b" "$(sql_escape "a'b")" "sql quote escaping"
+}
+
+test_validate_identity_name() {
+  validate_identity_name "alice_1.test-user" "identity" || fail "valid identity rejected"
+  if validate_identity_name "bad/user" "identity" >/dev/null 2>&1; then
+    fail "invalid identity accepted"
+  fi
 }
 
 test_default_home_path() {
@@ -153,6 +161,7 @@ test_kerberos_keytab_command() {
   assert_contains "$command" 'message["msSFU30NisDomain"]' "sets group msSFU NIS domain"
   assert_contains "$command" 'message["msSFU30Name"]' "sets group msSFU name"
   assert_contains "$command" "samba-tool group addmembers" "adds user to AD group"
+  assert_contains "$command" "grep -Fx \"\$username\"" "checks exact AD group membership"
   assert_contains "$command" "samba-tool user show" "checks existing AD user"
   assert_contains "$command" "samba-tool user create" "creates missing AD user"
   assert_contains "$command" "samba-tool user addunixattrs" "adds RFC2307 attrs"
@@ -175,6 +184,33 @@ test_kerberos_keytab_command() {
 
   command="$(build_farm_kerberos_keytab_command "alice" "alice@FARM.DECS.INTERNAL" "/etc/decs-krb/keytabs/alice.keytab" "true" 10123 10124 "projecta")"
   assert_contains "$command" "samba-tool user setpassword" "rotation resets AD password"
+}
+
+test_kerberos_group_management_commands() {
+  KERBEROS_REMOTE_SUDO="sudo -n"
+  local command
+
+  command="$(build_farm_kerberos_ensure_group_command "projecta" 10130)"
+  assert_contains "$command" "samba-tool group show \"\$groupname\"" "checks existing AD group"
+  assert_contains "$command" "samba-tool group add \"\$groupname\"" "creates AD group"
+  assert_contains "$command" 'message["gidNumber"]' "sets AD group gid"
+  assert_contains "$command" 'message["msSFU30NisDomain"]' "sets AD group NIS domain"
+  assert_contains "$command" 'message["msSFU30Name"]' "sets AD group msSFU name"
+
+  command="$(build_farm_kerberos_add_group_member_command "projecta" "alice")"
+  assert_contains "$command" "samba-tool user show \"\$username\"" "add checks AD user"
+  assert_contains "$command" "samba-tool group addmembers \"\$groupname\" \"\$username\"" "adds AD member"
+  assert_contains "$command" "grep -Fx \"\$username\"" "add checks exact member"
+
+  command="$(build_farm_kerberos_remove_group_member_command "projecta" "alice")"
+  assert_contains "$command" "samba-tool group removemembers \"\$groupname\" \"\$username\"" "removes AD member"
+
+  command="$(build_farm_kerberos_delete_group_command "projecta")"
+  assert_contains "$command" "samba-tool group delete \"\$groupname\"" "deletes AD group"
+
+  command="$(build_farm_kerberos_show_group_command "projecta")"
+  assert_contains "$command" "samba-tool group show \"\$groupname\"" "shows AD group"
+  assert_contains "$command" "samba-tool group listmembers \"\$groupname\"" "lists AD members"
 }
 
 test_kerberos_host_refresh_command() {
@@ -269,6 +305,7 @@ EOF
 }
 
 test_shell_quote
+test_validate_identity_name
 test_default_home_path
 test_custom_home_path_trims_slash
 test_kerberos_paths
@@ -279,6 +316,7 @@ test_kerberos_ccache_command
 test_kerberos_lookup_command
 test_kerberos_nas_gss_service_restart_command
 test_kerberos_keytab_command
+test_kerberos_group_management_commands
 test_kerberos_host_refresh_command
 test_kerberos_nfs_access_test_command
 test_prepare_invokes_raw_ansible

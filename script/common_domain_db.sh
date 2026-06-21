@@ -260,6 +260,34 @@ shell_quote() {
   printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
 }
 
+sql_escape() {
+  printf "%s" "$1" | sed "s/'/''/g"
+}
+
+validate_identity_name() {
+  local name="$1"
+  local label="${2:-name}"
+
+  if ! [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]]; then
+    echo "Error: ${label} must match ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$" >&2
+    return 1
+  fi
+}
+
+ensure_group_membership_schema() {
+  mysql_exec -e "
+    CREATE TABLE IF NOT EXISTS user_group_membership (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      ubuntu_uid INT NOT NULL,
+      ubuntu_gid INT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY unique_user_group_membership (ubuntu_uid, ubuntu_gid),
+      FOREIGN KEY (ubuntu_uid) REFERENCES user (ubuntu_uid),
+      FOREIGN KEY (ubuntu_gid) REFERENCES \`group\` (ubuntu_gid)
+    ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
+  "
+}
+
 run_remote_shell() {
   local host_alias="$1"
   local remote_command="$2"
@@ -504,7 +532,7 @@ PY
 
 if [ "\$groupname" != "\$username" ]; then
   ${sudo_prefix} samba-tool group addmembers "\$groupname" "\$username" >/dev/null 2>&1 || {
-    ${sudo_prefix} samba-tool group listmembers "\$groupname" | grep -F "\$username" >/dev/null
+    ${sudo_prefix} samba-tool group listmembers "\$groupname" | grep -Fx "\$username" >/dev/null
   }
 fi
 
@@ -517,6 +545,162 @@ ${sudo_prefix} chown root:root "\$keytab_file"
 ${sudo_prefix} chmod 0400 "\$keytab_file"
 ${sudo_prefix} klist -kte "\$keytab_file" >/dev/null
 EOF
+}
+
+build_farm_kerberos_ensure_group_command() {
+  local groupname="$1"
+  local gid="$2"
+  local sudo_prefix="${KERBEROS_REMOTE_SUDO:-sudo -n}"
+  local nis_domain="${FARM_KERBEROS_NIS_DOMAIN:-farm}"
+
+  cat <<EOF
+set -eu
+groupname=$(shell_quote "$groupname")
+gid=$(shell_quote "$gid")
+nis_domain=$(shell_quote "$nis_domain")
+
+if ! ${sudo_prefix} samba-tool group show "\$groupname" >/dev/null 2>&1; then
+  ${sudo_prefix} samba-tool group add "\$groupname" >/dev/null
+fi
+
+${sudo_prefix} env DECS_KRB_GROUPNAME="\$groupname" DECS_KRB_GROUP_GID="\$gid" DECS_KRB_NIS_DOMAIN="\$nis_domain" python3 - <<'PY'
+import os
+
+from samba.auth import system_session
+from samba.param import LoadParm
+from samba.samdb import SamDB
+from ldb import FLAG_MOD_REPLACE, Message, MessageElement
+
+groupname = os.environ["DECS_KRB_GROUPNAME"]
+gid = os.environ["DECS_KRB_GROUP_GID"]
+nis_domain = os.environ["DECS_KRB_NIS_DOMAIN"]
+
+lp = LoadParm()
+lp.load_default()
+samdb = SamDB(url="/var/lib/samba/private/sam.ldb", session_info=system_session(), lp=lp)
+result = samdb.search(expression=f"(&(sAMAccountName={groupname})(objectClass=group))", attrs=["distinguishedName"])
+if not result:
+    raise SystemExit(f"AD group not found: {groupname}")
+
+message = Message(result[0].dn)
+message["gidNumber"] = MessageElement(gid, FLAG_MOD_REPLACE, "gidNumber")
+message["msSFU30NisDomain"] = MessageElement(nis_domain, FLAG_MOD_REPLACE, "msSFU30NisDomain")
+message["msSFU30Name"] = MessageElement(groupname, FLAG_MOD_REPLACE, "msSFU30Name")
+samdb.modify(message)
+PY
+
+${sudo_prefix} samba-tool group show "\$groupname"
+EOF
+}
+
+build_farm_kerberos_add_group_member_command() {
+  local groupname="$1"
+  local username="$2"
+  local sudo_prefix="${KERBEROS_REMOTE_SUDO:-sudo -n}"
+
+  cat <<EOF
+set -eu
+groupname=$(shell_quote "$groupname")
+username=$(shell_quote "$username")
+${sudo_prefix} samba-tool user show "\$username" >/dev/null
+${sudo_prefix} samba-tool group show "\$groupname" >/dev/null
+${sudo_prefix} samba-tool group addmembers "\$groupname" "\$username" >/dev/null 2>&1 || {
+  ${sudo_prefix} samba-tool group listmembers "\$groupname" | grep -Fx "\$username" >/dev/null
+}
+${sudo_prefix} samba-tool group listmembers "\$groupname"
+EOF
+}
+
+build_farm_kerberos_remove_group_member_command() {
+  local groupname="$1"
+  local username="$2"
+  local sudo_prefix="${KERBEROS_REMOTE_SUDO:-sudo -n}"
+
+  cat <<EOF
+set -eu
+groupname=$(shell_quote "$groupname")
+username=$(shell_quote "$username")
+${sudo_prefix} samba-tool group show "\$groupname" >/dev/null
+if ${sudo_prefix} samba-tool group listmembers "\$groupname" | grep -Fx "\$username" >/dev/null; then
+  ${sudo_prefix} samba-tool group removemembers "\$groupname" "\$username" >/dev/null
+fi
+${sudo_prefix} samba-tool group listmembers "\$groupname"
+EOF
+}
+
+build_farm_kerberos_delete_group_command() {
+  local groupname="$1"
+  local sudo_prefix="${KERBEROS_REMOTE_SUDO:-sudo -n}"
+
+  cat <<EOF
+set -eu
+groupname=$(shell_quote "$groupname")
+if ${sudo_prefix} samba-tool group show "\$groupname" >/dev/null 2>&1; then
+  ${sudo_prefix} samba-tool group delete "\$groupname" >/dev/null
+fi
+echo "kerberos_ad_group_deleted=\$groupname"
+EOF
+}
+
+build_farm_kerberos_show_group_command() {
+  local groupname="$1"
+  local sudo_prefix="${KERBEROS_REMOTE_SUDO:-sudo -n}"
+
+  cat <<EOF
+set -eu
+groupname=$(shell_quote "$groupname")
+${sudo_prefix} samba-tool group show "\$groupname"
+echo "members:"
+${sudo_prefix} samba-tool group listmembers "\$groupname" || true
+EOF
+}
+
+ensure_farm_kerberos_ad_group() {
+  local host_alias="$1"
+  local groupname="$2"
+  local gid="$3"
+  local raw_command
+
+  raw_command="$(build_farm_kerberos_ensure_group_command "$groupname" "$gid")"
+  run_remote_shell "$host_alias" "$raw_command"
+}
+
+add_farm_kerberos_group_member() {
+  local host_alias="$1"
+  local groupname="$2"
+  local username="$3"
+  local raw_command
+
+  raw_command="$(build_farm_kerberos_add_group_member_command "$groupname" "$username")"
+  run_remote_shell "$host_alias" "$raw_command"
+}
+
+remove_farm_kerberos_group_member() {
+  local host_alias="$1"
+  local groupname="$2"
+  local username="$3"
+  local raw_command
+
+  raw_command="$(build_farm_kerberos_remove_group_member_command "$groupname" "$username")"
+  run_remote_shell "$host_alias" "$raw_command"
+}
+
+delete_farm_kerberos_ad_group() {
+  local host_alias="$1"
+  local groupname="$2"
+  local raw_command
+
+  raw_command="$(build_farm_kerberos_delete_group_command "$groupname")"
+  run_remote_shell "$host_alias" "$raw_command"
+}
+
+show_farm_kerberos_ad_group() {
+  local host_alias="$1"
+  local groupname="$2"
+  local raw_command
+
+  raw_command="$(build_farm_kerberos_show_group_command "$groupname")"
+  run_remote_shell "$host_alias" "$raw_command"
 }
 
 build_kerberos_host_refresh_command() {
