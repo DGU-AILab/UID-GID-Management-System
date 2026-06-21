@@ -145,14 +145,27 @@ test_kerberos_nas_gss_service_restart_command() {
 test_kerberos_keytab_command() {
   KERBEROS_REMOTE_SUDO="sudo -n"
   local command
-  command="$(build_farm_kerberos_keytab_command "alice" "alice@FARM.DECS.INTERNAL" "/etc/decs-krb/keytabs/alice.keytab" "false" 10123 10124)"
+  command="$(build_farm_kerberos_keytab_command "alice" "alice@FARM.DECS.INTERNAL" "/etc/decs-krb/keytabs/alice.keytab" "false" 10123 10124 "projecta")"
+  assert_contains "$command" "samba-tool group show" "checks existing AD group"
+  assert_contains "$command" "samba-tool group add" "creates missing AD group"
+  assert_contains "$command" "DECS_KRB_GROUPNAME=\"\$groupname\"" "sets AD group env"
+  assert_contains "$command" 'message["gidNumber"]' "sets RFC2307 group gid"
+  assert_contains "$command" 'message["msSFU30NisDomain"]' "sets group msSFU NIS domain"
+  assert_contains "$command" 'message["msSFU30Name"]' "sets group msSFU name"
+  assert_contains "$command" "samba-tool group addmembers" "adds user to AD group"
   assert_contains "$command" "samba-tool user show" "checks existing AD user"
   assert_contains "$command" "samba-tool user create" "creates missing AD user"
   assert_contains "$command" "samba-tool user addunixattrs" "adds RFC2307 attrs"
   assert_contains "$command" "--gid-number=\"\$gid\"" "sets RFC2307 gid"
   assert_contains "$command" "--unix-home='/home/alice'" "sets RFC2307 home"
   assert_contains "$command" "--login-shell=/bin/bash" "sets RFC2307 shell"
-  assert_contains "$command" "DECS_KRB_NIS_DOMAIN=\"\$nis_domain\" python3" "sets msSFU attrs through Samba Python"
+  assert_contains "$command" "DECS_KRB_UID=\"\$uid\"" "sets AD user uid env"
+  assert_contains "$command" "DECS_KRB_GID=\"\$gid\"" "sets AD user gid env"
+  assert_contains "$command" "DECS_KRB_NIS_DOMAIN=\"\$nis_domain\" python3" "sets AD user attrs through Samba Python"
+  assert_contains "$command" 'message["uidNumber"]' "refreshes user RFC2307 uid"
+  assert_contains "$command" 'message["gidNumber"]' "refreshes user RFC2307 gid"
+  assert_contains "$command" 'message["unixHomeDirectory"]' "refreshes user RFC2307 home"
+  assert_contains "$command" 'message["loginShell"]' "refreshes user RFC2307 shell"
   assert_contains "$command" 'message["msSFU30NisDomain"]' "sets msSFU NIS domain"
   assert_contains "$command" 'message["msSFU30Name"]' "sets msSFU username"
   assert_contains "$command" "samba-tool domain exportkeytab" "exports keytab"
@@ -160,7 +173,7 @@ test_kerberos_keytab_command() {
   assert_contains "$command" "chmod 0400 \"\$keytab_file\"" "locks keytab permissions"
   assert_contains "$command" "klist -kte \"\$keytab_file\"" "validates keytab"
 
-  command="$(build_farm_kerberos_keytab_command "alice" "alice@FARM.DECS.INTERNAL" "/etc/decs-krb/keytabs/alice.keytab" "true" 10123 10124)"
+  command="$(build_farm_kerberos_keytab_command "alice" "alice@FARM.DECS.INTERNAL" "/etc/decs-krb/keytabs/alice.keytab" "true" 10123 10124 "projecta")"
   assert_contains "$command" "samba-tool user setpassword" "rotation resets AD password"
 }
 

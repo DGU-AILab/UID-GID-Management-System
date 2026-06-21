@@ -397,12 +397,14 @@ build_farm_kerberos_keytab_command() {
   local rotate_keytab="$4"
   local uid="$5"
   local gid="$6"
+  local groupname="${7:-$username}"
   local sudo_prefix="${KERBEROS_REMOTE_SUDO:-sudo -n}"
   local nis_domain="${FARM_KERBEROS_NIS_DOMAIN:-farm}"
-  local keytab_dir quoted_username quoted_principal quoted_keytab quoted_keytab_dir quoted_rotate quoted_home quoted_nis_domain
+  local keytab_dir quoted_username quoted_principal quoted_keytab quoted_keytab_dir quoted_rotate quoted_home quoted_nis_domain quoted_groupname
 
   keytab_dir="$(dirname "$keytab_file")"
   quoted_username="$(shell_quote "$username")"
+  quoted_groupname="$(shell_quote "$groupname")"
   quoted_principal="$(shell_quote "$principal")"
   quoted_keytab="$(shell_quote "$keytab_file")"
   quoted_keytab_dir="$(shell_quote "$keytab_dir")"
@@ -413,6 +415,7 @@ build_farm_kerberos_keytab_command() {
   cat <<EOF
 set -eu
 username=${quoted_username}
+groupname=${quoted_groupname}
 principal=${quoted_principal}
 keytab_file=${quoted_keytab}
 keytab_dir=${quoted_keytab_dir}
@@ -422,6 +425,38 @@ gid=${gid}
 nis_domain=${quoted_nis_domain}
 
 ${sudo_prefix} install -d -o root -g root -m 0700 "\$keytab_dir"
+
+if [ "\$groupname" != "\$username" ]; then
+  if ! ${sudo_prefix} samba-tool group show "\$groupname" >/dev/null 2>&1; then
+    ${sudo_prefix} samba-tool group add "\$groupname" >/dev/null
+  fi
+
+  ${sudo_prefix} env DECS_KRB_GROUPNAME="\$groupname" DECS_KRB_GROUP_GID="\$gid" DECS_KRB_NIS_DOMAIN="\$nis_domain" python3 - <<'PY'
+import os
+
+from samba.auth import system_session
+from samba.param import LoadParm
+from samba.samdb import SamDB
+from ldb import FLAG_MOD_REPLACE, Message, MessageElement
+
+groupname = os.environ["DECS_KRB_GROUPNAME"]
+gid = os.environ["DECS_KRB_GROUP_GID"]
+nis_domain = os.environ["DECS_KRB_NIS_DOMAIN"]
+
+lp = LoadParm()
+lp.load_default()
+samdb = SamDB(url="/var/lib/samba/private/sam.ldb", session_info=system_session(), lp=lp)
+result = samdb.search(expression=f"(&(sAMAccountName={groupname})(objectClass=group))", attrs=["distinguishedName"])
+if not result:
+    raise SystemExit(f"AD group not found: {groupname}")
+
+message = Message(result[0].dn)
+message["gidNumber"] = MessageElement(gid, FLAG_MOD_REPLACE, "gidNumber")
+message["msSFU30NisDomain"] = MessageElement(nis_domain, FLAG_MOD_REPLACE, "msSFU30NisDomain")
+message["msSFU30Name"] = MessageElement(groupname, FLAG_MOD_REPLACE, "msSFU30Name")
+samdb.modify(message)
+PY
+fi
 
 if ! ${sudo_prefix} samba-tool user show "\$username" >/dev/null 2>&1; then
   new_password="Krb\$(date +%y%m%d)!\$(tr -dc A-Za-z0-9 </dev/urandom | head -c 24)"
@@ -436,7 +471,7 @@ if ! ${sudo_prefix} samba-tool user show "\$username" | grep -q '^uidNumber:'; t
   ${sudo_prefix} samba-tool user addunixattrs "\$username" "\$uid" --gid-number="\$gid" --unix-home=${quoted_home} --login-shell=/bin/bash --uid="\$username" >/dev/null
 fi
 
-${sudo_prefix} env DECS_KRB_USERNAME="\$username" DECS_KRB_NIS_DOMAIN="\$nis_domain" python3 - <<'PY'
+${sudo_prefix} env DECS_KRB_USERNAME="\$username" DECS_KRB_UID="\$uid" DECS_KRB_GID="\$gid" DECS_KRB_NIS_DOMAIN="\$nis_domain" python3 - <<'PY'
 import os
 
 from samba.auth import system_session
@@ -445,7 +480,10 @@ from samba.samdb import SamDB
 from ldb import FLAG_MOD_REPLACE, Message, MessageElement
 
 username = os.environ["DECS_KRB_USERNAME"]
+uid = os.environ["DECS_KRB_UID"]
+gid = os.environ["DECS_KRB_GID"]
 nis_domain = os.environ["DECS_KRB_NIS_DOMAIN"]
+home = f"/home/{username}"
 
 lp = LoadParm()
 lp.load_default()
@@ -455,10 +493,20 @@ if not result:
     raise SystemExit(f"AD user not found: {username}")
 
 message = Message(result[0].dn)
+message["uidNumber"] = MessageElement(uid, FLAG_MOD_REPLACE, "uidNumber")
+message["gidNumber"] = MessageElement(gid, FLAG_MOD_REPLACE, "gidNumber")
+message["unixHomeDirectory"] = MessageElement(home, FLAG_MOD_REPLACE, "unixHomeDirectory")
+message["loginShell"] = MessageElement("/bin/bash", FLAG_MOD_REPLACE, "loginShell")
 message["msSFU30NisDomain"] = MessageElement(nis_domain, FLAG_MOD_REPLACE, "msSFU30NisDomain")
 message["msSFU30Name"] = MessageElement(username, FLAG_MOD_REPLACE, "msSFU30Name")
 samdb.modify(message)
 PY
+
+if [ "\$groupname" != "\$username" ]; then
+  ${sudo_prefix} samba-tool group addmembers "\$groupname" "\$username" >/dev/null 2>&1 || {
+    ${sudo_prefix} samba-tool group listmembers "\$groupname" | grep -F "\$username" >/dev/null
+  }
+fi
 
 tmp_keytab="\$(mktemp)"
 ${sudo_prefix} samba-tool domain exportkeytab "\$tmp_keytab" --principal="\$principal" >/dev/null
@@ -834,9 +882,10 @@ ensure_farm_kerberos_keytab() {
   local rotate_keytab="$5"
   local uid="$6"
   local gid="$7"
+  local groupname="${8:-$username}"
   local raw_command
 
-  raw_command="$(build_farm_kerberos_keytab_command "$username" "$principal" "$keytab_file" "$rotate_keytab" "$uid" "$gid")"
+  raw_command="$(build_farm_kerberos_keytab_command "$username" "$principal" "$keytab_file" "$rotate_keytab" "$uid" "$gid" "$groupname")"
   run_remote_shell "$host_alias" "$raw_command"
 }
 

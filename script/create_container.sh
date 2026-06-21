@@ -458,7 +458,7 @@ if [ "$enable_kerberos" = "true" ]; then
   kerberos_principal="$(farm_kerberos_principal "$username")"
   kerberos_keytab_file="$(farm_kerberos_keytab_file "$username")"
   kerberos_refresh_env_file="$(farm_kerberos_refresh_env_file "$username")"
-  kerberos_docker_params=" --mount type=bind,source='${kerberos_ccache_dir}',target='${kerberos_ccache_dir}' --mount type=bind,source='${kerberos_krb5_conf}',target=/etc/krb5.conf,readonly -e KRB5CCNAME='FILE:${kerberos_ccache_file}' -e DECS_KERBEROS_ENABLED='true' -e DECS_KERBEROS_HOST_KEYTAB='true' -e DECS_DISABLE_USER_SUDO='true' -e DECS_KRB5_PRINCIPAL='${kerberos_principal}' -e KRB5_REALM='$(farm_kerberos_realm)'"
+  kerberos_docker_params=" --mount type=bind,source='${kerberos_ccache_dir}',target='${kerberos_ccache_dir}' --mount type=bind,source='${kerberos_krb5_conf}',target=/etc/krb5.conf,readonly -e KRB5CCNAME='FILE:${kerberos_ccache_file}' -e DECS_KERBEROS_ENABLED='true' -e DECS_KERBEROS_HOST_KEYTAB='true' -e DECS_USER_SUDO_MODE='restricted' -e DECS_KRB5_PRINCIPAL='${kerberos_principal}' -e KRB5_REALM='$(farm_kerberos_realm)'"
 fi
 
 function cleanup_and_exit {
@@ -550,6 +550,10 @@ if [ "$dry_run" = "true" ]; then
     echo "[DRY-RUN] Kerberos refresh env: ${kerberos_refresh_env_file} (root:root 0600 on ${target_host})"
     echo "[DRY-RUN] Kerberos keytab rotation requested: ${rotate_kerberos_keytab}"
     echo "[DRY-RUN] Kerberos krb5.conf bind source: ${kerberos_krb5_conf}"
+    if [ "$groupname" != "$username" ]; then
+      echo "[DRY-RUN] Kerberos AD group will be ensured: ${groupname} (gidNumber=${available_gid})"
+      echo "[DRY-RUN] Kerberos AD membership will include: ${username} -> ${groupname}"
+    fi
   fi
   if [ -n "$user_info" ]; then
     echo "[DRY-RUN] Existing user will be updated: ${username} (UID=${available_uid}, GID=${available_gid})"
@@ -580,7 +584,7 @@ if [ "$domain_name" = "FARM" ]; then
   if [ "$enable_kerberos" = "true" ]; then
     farm_nas_identity=""
     echo "Ensuring FARM AD principal and host keytab for ${kerberos_principal} on ${kerberos_ad_dc_host}..."
-    if ! ensure_farm_kerberos_keytab "$kerberos_ad_dc_host" "$username" "$kerberos_principal" "$kerberos_keytab_file" "$rotate_kerberos_keytab" "$available_uid" "$available_gid"; then
+    if ! ensure_farm_kerberos_keytab "$kerberos_ad_dc_host" "$username" "$kerberos_principal" "$kerberos_keytab_file" "$rotate_kerberos_keytab" "$available_uid" "$available_gid" "$groupname"; then
       cleanup_and_exit "Failed to prepare FARM Kerberos keytab for ${username}"
     fi
     echo "Resolving FARM NAS AD-mapped identity for ${username}..."

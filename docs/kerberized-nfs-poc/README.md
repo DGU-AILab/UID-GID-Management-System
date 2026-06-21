@@ -171,9 +171,23 @@ decs-krb-refresh@<username>.timer
 보안 제약:
 
 - 컨테이너 사용자가 root/sudo 권한을 가지면 `setuid`로 다른 UID를 가장할 수 있고, host `rpc.gssd`가 그 UID의 host ccache를 찾아 다른 사용자의 Kerberos NFS home에 접근할 수 있다.
-- 따라서 Kerberos 모드 이미지는 `DECS_DISABLE_USER_SUDO=true`를 지원해야 하며, create script는 Kerberos 모드에서 이 값을 전달한다.
-- 2026-06-21 테스트에서 passwordless sudo 제거 후 일반 사용자의 `sudo -n id`, `setpriv --reuid=<other_uid>`, cross-home write가 모두 실패했다.
-- local Ubuntu group만으로 Kerberos NFS group sharing을 기대하면 안 된다. `chmod 770`은 NAS에서 `FARM\Domain Users` group write가 되어 도메인 전체 write로 열릴 수 있다. Kerberos NFS group sharing은 별도 AD group/ACL 설계가 필요하다.
+- 따라서 Kerberos 모드 이미지는 `DECS_USER_SUDO_MODE=restricted`를 기본으로 사용한다. package install용 sudo는 허용하지만 `sudo -u`, `su`, `setpriv`, `runuser`, `chown/chgrp/chmod`, mount namespace 관련 명령, root shell, interpreter one-liner, 보호 경로 overwrite는 sudoers deny list로 막는다. 더 강하게 막아야 하는 경우에는 `DECS_USER_SUDO_MODE=disabled`를 명시한다.
+- 2026-06-21 restricted sudo 테스트에서 `sudo true`, `sudo apt-get --version`은 허용되고 `sudo -u nobody`, `sudo --user nobody`, `sudo su`, `sudo setpriv`, `sudo chmod`, `sudo bash`, `sudo python3 -c`는 실패했다. `decs-share`는 사용자 권한으로 `chmod 2770` 공유 디렉토리를 만들고, `sudo chgrp`는 실패했다.
+- local Ubuntu group만으로 Kerberos NFS group sharing을 기대하면 안 된다. `chmod 770`은 NAS에서 `FARM\Domain Users` group write가 되어 도메인 전체 write로 열릴 수 있다. Kerberos NFS group sharing은 AD group이 필요하다.
+
+사용자 self-service group sharing:
+
+```text
+관리자:
+  create_container.sh --enable-kerberos true --group groupA ...
+  -> AD groupA 생성/갱신, gidNumber/msSFU30* 설정, user membership 추가
+
+사용자:
+  decs-share ~/sharing_dir groupA
+  -> 사용자 권한으로 mkdir, chgrp groupA, chmod 2770 수행
+```
+
+관리자는 공유 디렉토리를 만들지 않는다. 사용자가 자기 home 안에서 원하는 디렉토리를 만들고, 자신이 속한 AD group으로 직접 공유한다. restricted sudo는 `sudo chgrp/chmod/chown`만 막고 일반 사용자 권한의 `chgrp/chmod`는 허용하므로 이 흐름과 충돌하지 않는다.
 
 keytab rotation은 `create_container.sh --enable-kerberos true --rotate-kerberos-keytab true`로 수행한다. 이 작업은 AD user password를 재설정하고 새 keytab을 export한다. 이미 발급된 ticket은 보통 ticket lifetime까지 유효하므로 유출 대응 시에는 ticket lifetime/renewable lifetime도 같이 조정해야 한다.
 
