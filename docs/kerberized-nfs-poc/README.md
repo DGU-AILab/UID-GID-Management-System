@@ -191,11 +191,11 @@ decs-krb-refresh@<username>.timer
   -> 사용자 권한으로 mkdir, chgrp groupA, chmod 2770 수행
 ```
 
-관리자는 공유 디렉토리를 만들지 않는다. 사용자가 자기 home 안에서 원하는 디렉토리를 만들고, 자신이 속한 AD group으로 직접 공유한다. restricted sudo는 `sudo chgrp/chmod/chown`만 막고 일반 사용자 권한의 `chgrp/chmod`는 허용하므로 이 흐름과 충돌하지 않는다. `manage_group.sh`로 추가한 supplemental group은 다음 컨테이너 생성/재생성 때 `DECS_SUPPLEMENTAL_GROUPS`로 컨테이너 local group에 반영된다.
+관리자는 공유 디렉토리를 만들지 않는다. 사용자가 자기 home 안에서 원하는 디렉토리를 만들고, 자신이 속한 AD group으로 직접 공유한다. restricted sudo는 `sudo chgrp/chmod/chown`만 막고 일반 사용자 권한의 `chgrp/chmod`는 허용하므로 이 흐름과 충돌하지 않는다. Kerberos NFS에서 `chgrp`가 성공하려면 컨테이너 runtime GID가 Synology의 AD-mapped group GID와 같아야 하고, target host NFSv4 idmapper가 그 GID를 `FARM\<group>`으로 해석해야 한다. create script는 NAS `wbinfo --group-info`로 AD-mapped GID를 조회하고 host local shadow group/user entry를 준비한다. `manage_group.sh`로 추가한 supplemental group은 다음 컨테이너 생성/재생성 때 NAS AD-mapped GID 형태의 `DECS_SUPPLEMENTAL_GROUPS`로 컨테이너 local group에 반영된다.
 
 keytab rotation은 `create_container.sh --enable-kerberos true --rotate-kerberos-keytab true`로 수행한다. 이 작업은 AD user password를 재설정하고 새 keytab을 export한다. 이미 발급된 ticket은 보통 ticket lifetime까지 유효하므로 유출 대응 시에는 ticket lifetime/renewable lifetime도 같이 조정해야 한다.
 
-신규 AD user는 `samba-tool user addunixattrs`로 `uidNumber`, `gidNumber`, `unixHomeDirectory`, `loginShell`을 추가하고, Samba Python API로 `msSFU30Name`, `msSFU30NisDomain`도 설정한다. 2026-06-21 테스트에서 Synology NAS는 `msSFU30*`가 없는 신규 principal을 `wbinfo`/`id`로는 정상 인식하면서도 NFS Kerberos write는 거부했다. 또한 신규 principal은 `wbinfo`에 보인 뒤에도 NFS GSS owner mapping cache가 바로 갱신되지 않아 `750` home owner write가 실패했다. NAS `svcgssd`/`idmapd` 재시작 후 같은 principal이 성공했으므로 create script는 NAS Kerberos NFS 보조 데몬을 refresh한 뒤 실제 NFS write check를 통과해야만 컨테이너 생성과 DB 기록으로 넘어간다.
+신규 AD user는 `samba-tool user addunixattrs`로 `uidNumber`, `gidNumber`, `unixHomeDirectory`, `loginShell`을 추가하고, Samba Python API로 `msSFU30Name`, `msSFU30NisDomain`도 설정한다. 2026-06-21 테스트에서 Synology NAS는 `msSFU30*`가 없는 신규 principal을 `wbinfo`/`id`로는 정상 인식하면서도 NFS Kerberos write는 거부했다. 또한 신규 principal은 `wbinfo`에 보인 뒤에도 NFS GSS/RPC identity cache가 바로 갱신되지 않아 `750` home owner write가 실패했다. create script는 NAS `svcgssd`/`idmapd` 재시작과 `/proc/net/rpc/*/flush`를 수행하고, 실제 NFS write check를 통과해야만 컨테이너 생성과 DB 기록으로 넘어간다. 첫 write check가 실패하면 NAS GSS/RPC cache를 한 번 더 refresh하고 재시도한다.
 
 ## Rollback
 

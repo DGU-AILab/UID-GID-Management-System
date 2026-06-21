@@ -485,6 +485,7 @@ kerberos_refresh_env_file=""
 kerberos_krb5_conf="${FARM_KERBEROS_KRB5_CONF:-/etc/krb5.conf}"
 kerberos_ad_dc_host="${FARM_KERBEROS_AD_DC_HOST:-farm2}"
 kerberos_docker_params=""
+container_gid="$available_gid"
 
 if [ "$enable_kerberos" = "true" ]; then
   if [ "$kerberos_ad_dc_host" != "$target_host" ]; then
@@ -593,9 +594,11 @@ if [ "$dry_run" = "true" ]; then
     if [ "$groupname" != "$username" ]; then
       echo "[DRY-RUN] Kerberos AD group will be ensured: ${groupname} (gidNumber=${available_gid})"
       echo "[DRY-RUN] Kerberos AD membership will include: ${username} -> ${groupname}"
+      echo "[DRY-RUN] Kerberos container primary GID will be resolved from NAS AD mapping for: ${groupname}"
     fi
     if [ -n "$supplemental_group_specs" ]; then
-      echo "[DRY-RUN] Kerberos supplemental groups passed to container: ${supplemental_group_specs}"
+      echo "[DRY-RUN] Kerberos supplemental groups from DB: ${supplemental_group_specs}"
+      echo "[DRY-RUN] Kerberos supplemental container GIDs will be resolved from NAS AD mapping at apply time"
     fi
   fi
   if [ -n "$user_info" ]; then
@@ -630,6 +633,36 @@ if [ "$domain_name" = "FARM" ]; then
     if ! ensure_farm_kerberos_keytab "$kerberos_ad_dc_host" "$username" "$kerberos_principal" "$kerberos_keytab_file" "$rotate_kerberos_keytab" "$available_uid" "$available_gid" "$groupname"; then
       cleanup_and_exit "Failed to prepare FARM Kerberos keytab for ${username}"
     fi
+    if [ "$groupname" != "$username" ]; then
+      echo "Resolving FARM NAS AD-mapped group GID for ${groupname}..."
+      if ! container_gid="$(lookup_farm_nas_ad_group_gid_with_retry "$groupname")"; then
+        cleanup_and_exit "Failed to resolve FARM NAS AD group GID for ${groupname}. Create the AD group before enabling Kerberos sharing."
+      fi
+      echo "Using Kerberos container GID ${container_gid} for ${groupname} (DB GID ${available_gid})"
+      echo "Preparing Kerberos NFS host identity mapping for ${username}/${groupname} on ${target_host}..."
+      if ! ensure_remote_kerberos_nfs_identity "$target_host" "$username" "$available_uid" "$groupname" "$container_gid"; then
+        cleanup_and_exit "Failed to prepare Kerberos NFS host identity mapping for ${username}/${groupname}"
+      fi
+    fi
+    if [ -n "$supplemental_group_rows" ]; then
+      supplemental_group_specs=""
+      while IFS=$'\t' read -r supplemental_group_name supplemental_group_gid; do
+        [ -n "$supplemental_group_name" ] || continue
+        echo "Resolving FARM NAS AD-mapped supplemental group GID for ${supplemental_group_name}..."
+        if ! supplemental_group_gid="$(lookup_farm_nas_ad_group_gid_with_retry "$supplemental_group_name")"; then
+          cleanup_and_exit "Failed to resolve FARM NAS AD supplemental group GID for ${supplemental_group_name}"
+        fi
+        echo "Preparing Kerberos NFS host group mapping for supplemental group ${supplemental_group_name} on ${target_host}..."
+        if ! ensure_remote_kerberos_nfs_group "$target_host" "$supplemental_group_name" "$supplemental_group_gid"; then
+          cleanup_and_exit "Failed to prepare Kerberos NFS host group mapping for ${supplemental_group_name}"
+        fi
+        if [ -n "$supplemental_group_specs" ]; then
+          supplemental_group_specs+=","
+        fi
+        supplemental_group_specs+="${supplemental_group_name}:${supplemental_group_gid}"
+      done <<<"$supplemental_group_rows"
+      supplemental_docker_params=" -e DECS_SUPPLEMENTAL_GROUPS='${supplemental_group_specs}'"
+    fi
     echo "Resolving FARM NAS AD-mapped identity for ${username}..."
     if ! farm_nas_identity="$(lookup_farm_nas_ad_identity_with_retry "$username")"; then
       cleanup_and_exit "Failed to resolve FARM NAS AD identity for ${username}. Create the AD principal before enabling Kerberos."
@@ -644,16 +677,23 @@ if [ "$domain_name" = "FARM" ]; then
       cleanup_and_exit "Failed to refresh FARM NAS Kerberos NFS identity services for ${username}"
     fi
     echo "Preparing Kerberos credential cache directory ${kerberos_ccache_dir} on ${target_host}..."
-    if ! prepare_remote_kerberos_ccache_dir "$target_host" "$available_uid" "$available_gid"; then
+    if ! prepare_remote_kerberos_ccache_dir "$target_host" "$available_uid" "$container_gid"; then
       cleanup_and_exit "Failed to prepare Kerberos credential cache directory for ${username}"
     fi
     echo "Installing Kerberos host refresh service for ${username} on ${target_host}..."
-    if ! install_farm_kerberos_host_refresh "$target_host" "$username" "$available_uid" "$available_gid" "$kerberos_principal" "$kerberos_keytab_file" "$kerberos_ccache_dir" "$kerberos_ccache_file" "$kerberos_refresh_env_file"; then
+    if ! install_farm_kerberos_host_refresh "$target_host" "$username" "$available_uid" "$container_gid" "$kerberos_principal" "$kerberos_keytab_file" "$kerberos_ccache_dir" "$kerberos_ccache_file" "$kerberos_refresh_env_file"; then
       cleanup_and_exit "Failed to install Kerberos host refresh service for ${username}"
     fi
     echo "Verifying Kerberos NFS access for ${username} on ${target_host}..."
-    if ! verify_remote_kerberos_nfs_home_access "$target_host" "$(farm_kerberos_mount_user_share_root)" "$username" "$available_uid" "$available_gid" "$kerberos_ccache_file"; then
-      cleanup_and_exit "Kerberos NFS access check failed for ${username}. Synology NFS identity mapping may need refresh before container creation."
+    if ! verify_remote_kerberos_nfs_home_access "$target_host" "$(farm_kerberos_mount_user_share_root)" "$username" "$available_uid" "$container_gid" "$kerberos_ccache_file"; then
+      echo "Kerberos NFS access check failed once for ${username}; refreshing NAS GSS/RPC caches and retrying..."
+      if ! restart_farm_kerberos_nas_gss_services; then
+        cleanup_and_exit "Failed to refresh FARM NAS Kerberos NFS identity services after access-check failure for ${username}"
+      fi
+      lookup_farm_nas_ad_identity "$username" >/dev/null 2>&1 || true
+      if ! verify_remote_kerberos_nfs_home_access "$target_host" "$(farm_kerberos_mount_user_share_root)" "$username" "$available_uid" "$container_gid" "$kerberos_ccache_file"; then
+        cleanup_and_exit "Kerberos NFS access check failed for ${username}. Synology NFS identity mapping may need refresh before container creation."
+      fi
     fi
   else
     echo "Preparing FARM NAS home ${farm_nas_home_dir} for ${username} (${available_uid}:${available_gid})..."
@@ -670,7 +710,7 @@ if [ "$enable_vnc" = "true" ]; then
   vnc_env_params=" -e ENABLE_VNC='true' -e VNC_PASSWORD='${vnc_password}'"
 fi
 
-remote_run_command="docker run -dit --init --gpus device=all --memory=192g --memory-swap=192g ${port_params} --runtime=nvidia --cap-add=SYS_ADMIN --ipc=host --mount type=bind,source='${home_mount_source}',target=/home/${kerberos_docker_params} --name '${container_name_param}' -e USER_ID='${username}' -e GID='${available_gid}' -e TARGET_GID='${available_gid}' -e USER_PW='${user_password}' -e USER_GROUP='${groupname}' -e UID='${available_uid}' -e TARGET_UID='${available_uid}'${supplemental_docker_params}${vnc_env_params} -e NVIDIA_DRIVER_CAPABILITIES='compute,utility,graphics,display' dguailab/${container_image}:${container_version}"
+remote_run_command="docker run -dit --init --gpus device=all --memory=192g --memory-swap=192g ${port_params} --runtime=nvidia --cap-add=SYS_ADMIN --ipc=host --mount type=bind,source='${home_mount_source}',target=/home/${kerberos_docker_params} --name '${container_name_param}' -e USER_ID='${username}' -e GID='${container_gid}' -e TARGET_GID='${container_gid}' -e USER_PW='${user_password}' -e USER_GROUP='${groupname}' -e UID='${available_uid}' -e TARGET_UID='${available_uid}'${supplemental_docker_params}${vnc_env_params} -e NVIDIA_DRIVER_CAPABILITIES='compute,utility,graphics,display' dguailab/${container_image}:${container_version}"
 container_output=$(run_remote_shell_capture "$target_host" "$remote_run_command") || cleanup_and_exit "Failed to create Docker container on ${target_host}"
 container_id=$(printf '%s\n' "$container_output" | tail -n1 | tr -d '\r')
 

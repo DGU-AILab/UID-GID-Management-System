@@ -124,6 +124,27 @@ test_kerberos_ccache_command() {
   assert_contains "$command" "sudo -n chmod 700 '/run/user/10123'" "ccache chmod command"
 }
 
+test_kerberos_host_nfs_identity_command() {
+  KERBEROS_REMOTE_SUDO="sudo -n"
+  FARM_KERBEROS_AD_NETBIOS="FARM"
+  local command
+  command="$(build_kerberos_host_nfs_identity_command "alice" 10123 "projecta" 96470120)"
+  assert_contains "$command" "host_group='FARM\\projecta'" "uses NetBIOS-qualified host group"
+  assert_contains "$command" "groupadd -g \"\$gid\" \"\$host_group\"" "creates host group"
+  assert_contains "$command" "useradd -u \"\$uid\" -g \"\$gid\" -M -N -s /usr/sbin/nologin \"\$username\"" "creates host user shadow entry"
+  assert_contains "$command" "nfsidmap -c" "clears host NFS idmap cache"
+}
+
+test_kerberos_host_nfs_group_command() {
+  KERBEROS_REMOTE_SUDO="sudo -n"
+  FARM_KERBEROS_AD_NETBIOS="FARM"
+  local command
+  command="$(build_kerberos_host_nfs_group_command "projecta" 96470120)"
+  assert_contains "$command" "host_group='FARM\\projecta'" "uses NetBIOS-qualified host group"
+  assert_contains "$command" "groupmod -n \"\$host_group\" \"\$current_group\"" "renames unqualified host group"
+  assert_contains "$command" "kerberos_host_nfs_group_ready" "reports group mapping ready"
+}
+
 test_kerberos_lookup_command() {
   FARM_KERBEROS_AD_NETBIOS="FARM"
   local command
@@ -131,6 +152,15 @@ test_kerberos_lookup_command() {
   assert_contains "$command" "/usr/local/packages/@appstore/SMBService/usr/bin/wbinfo" "wbinfo path"
   assert_contains "$command" "'FARM\\alice'" "AD identity"
   assert_contains "$command" "awk -F:" "parse uid/gid"
+}
+
+test_kerberos_group_lookup_command() {
+  FARM_KERBEROS_AD_NETBIOS="FARM"
+  local command
+  command="$(build_farm_nas_lookup_ad_group_gid_command "projecta")"
+  assert_contains "$command" "/usr/local/packages/@appstore/SMBService/usr/bin/wbinfo" "wbinfo path"
+  assert_contains "$command" "--group-info 'FARM\\projecta'" "AD group identity"
+  assert_contains "$command" "awk -F:" "parse group gid"
 }
 
 test_kerberos_nas_gss_service_restart_command() {
@@ -147,7 +177,10 @@ test_kerberos_nas_gss_service_restart_command() {
   assert_contains "$command" "\"\$svcgssd_bin\" -p \"\$nfs_principal\"" "starts svcgssd with principal"
   assert_contains "$command" "kill \$(pidof idmapd)" "restarts idmapd"
   assert_contains "$command" "\"\$idmapd_bin\"" "starts idmapd"
-  assert_contains "$command" "kerberos_nas_gss_services_restarted" "reports success"
+  assert_contains "$command" "/proc/net/rpc/auth.unix.gid/flush" "flushes NAS RPC group cache"
+  assert_contains "$command" "/proc/net/rpc/auth.rpcsec.context/flush" "flushes NAS RPCSEC context cache"
+  assert_contains "$command" "tee \"\$cache_flush\"" "writes cache flush timestamp with sudo"
+  assert_contains "$command" "kerberos_nas_gss_services_restarted_and_rpc_caches_flushed" "reports success"
 }
 
 test_kerberos_keytab_command() {
@@ -313,7 +346,10 @@ test_prepare_command
 test_prepare_command_without_sudo
 test_kerberos_prepare_home_command
 test_kerberos_ccache_command
+test_kerberos_host_nfs_identity_command
+test_kerberos_host_nfs_group_command
 test_kerberos_lookup_command
+test_kerberos_group_lookup_command
 test_kerberos_nas_gss_service_restart_command
 test_kerberos_keytab_command
 test_kerberos_group_management_commands

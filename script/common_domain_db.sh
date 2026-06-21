@@ -838,6 +838,21 @@ printf '%s\n' "\$entry" | awk -F: '{ print \$3 " " \$4 }'
 EOF
 }
 
+build_farm_nas_lookup_ad_group_gid_command() {
+  local groupname="$1"
+  local netbios_domain="${FARM_KERBEROS_AD_NETBIOS:-FARM}"
+  local quoted_identity
+
+  quoted_identity="$(shell_quote "${netbios_domain}\\${groupname}")"
+
+  cat <<EOF
+set -eu
+wbinfo_bin=/usr/local/packages/@appstore/SMBService/usr/bin/wbinfo
+entry="\$("\$wbinfo_bin" --group-info ${quoted_identity})"
+printf '%s\n' "\$entry" | awk -F: '{ print \$3 }'
+EOF
+}
+
 build_farm_kerberos_prepare_home_command() {
   local home_dir="$1"
   local nas_uid="$2"
@@ -871,6 +886,110 @@ set -eu
 ${sudo_prefix} install -d -o ${uid} -g ${gid} -m 0700 ${quoted_dir}
 ${sudo_prefix} chown ${quoted_owner} ${quoted_dir}
 ${sudo_prefix} chmod 700 ${quoted_dir}
+EOF
+}
+
+build_kerberos_host_nfs_identity_command() {
+  local username="$1"
+  local uid="$2"
+  local groupname="$3"
+  local gid="$4"
+  local sudo_prefix="${KERBEROS_REMOTE_SUDO:-sudo -n}"
+  local netbios_domain="${FARM_KERBEROS_AD_NETBIOS:-FARM}"
+  local host_group
+
+  host_group="${netbios_domain}\\${groupname}"
+
+  cat <<EOF
+set -eu
+username=$(shell_quote "$username")
+uid=$(shell_quote "$uid")
+groupname=$(shell_quote "$groupname")
+host_group=$(shell_quote "$host_group")
+gid=$(shell_quote "$gid")
+
+if getent group "\$host_group" >/dev/null 2>&1; then
+  current_gid="\$(getent group "\$host_group" | awk -F: 'NR==1 { print \$3 }')"
+  if [ "\$current_gid" != "\$gid" ]; then
+    echo "Host group \$host_group exists with GID \$current_gid, expected \$gid" >&2
+    exit 1
+  fi
+elif getent group "\$gid" >/dev/null 2>&1; then
+  current_group="\$(getent group "\$gid" | awk -F: 'NR==1 { print \$1 }')"
+  if [ "\$current_group" = "\$groupname" ]; then
+    ${sudo_prefix} groupmod -n "\$host_group" "\$current_group"
+  else
+    echo "Host GID \$gid already belongs to \$current_group, expected \$host_group" >&2
+    exit 1
+  fi
+else
+  ${sudo_prefix} groupadd -g "\$gid" "\$host_group"
+fi
+
+if getent passwd "\$username" >/dev/null 2>&1; then
+  current_uid="\$(getent passwd "\$username" | awk -F: 'NR==1 { print \$3 }')"
+  if [ "\$current_uid" != "\$uid" ]; then
+    echo "Host user \$username exists with UID \$current_uid, expected \$uid" >&2
+    exit 1
+  fi
+  ${sudo_prefix} usermod -g "\$gid" "\$username"
+elif getent passwd "\$uid" >/dev/null 2>&1; then
+  current_user="\$(getent passwd "\$uid" | awk -F: 'NR==1 { print \$1 }')"
+  if [ "\$current_user" != "\$username" ]; then
+    echo "Host UID \$uid already belongs to \$current_user, expected \$username" >&2
+    exit 1
+  fi
+  ${sudo_prefix} usermod -g "\$gid" "\$username"
+else
+  ${sudo_prefix} useradd -u "\$uid" -g "\$gid" -M -N -s /usr/sbin/nologin "\$username"
+fi
+
+if command -v nfsidmap >/dev/null 2>&1; then
+  ${sudo_prefix} nfsidmap -c >/dev/null 2>&1 || true
+fi
+
+echo "kerberos_host_nfs_identity_ready user=\$username uid=\$uid group=\$host_group gid=\$gid"
+EOF
+}
+
+build_kerberos_host_nfs_group_command() {
+  local groupname="$1"
+  local gid="$2"
+  local sudo_prefix="${KERBEROS_REMOTE_SUDO:-sudo -n}"
+  local netbios_domain="${FARM_KERBEROS_AD_NETBIOS:-FARM}"
+  local host_group
+
+  host_group="${netbios_domain}\\${groupname}"
+
+  cat <<EOF
+set -eu
+groupname=$(shell_quote "$groupname")
+host_group=$(shell_quote "$host_group")
+gid=$(shell_quote "$gid")
+
+if getent group "\$host_group" >/dev/null 2>&1; then
+  current_gid="\$(getent group "\$host_group" | awk -F: 'NR==1 { print \$3 }')"
+  if [ "\$current_gid" != "\$gid" ]; then
+    echo "Host group \$host_group exists with GID \$current_gid, expected \$gid" >&2
+    exit 1
+  fi
+elif getent group "\$gid" >/dev/null 2>&1; then
+  current_group="\$(getent group "\$gid" | awk -F: 'NR==1 { print \$1 }')"
+  if [ "\$current_group" = "\$groupname" ]; then
+    ${sudo_prefix} groupmod -n "\$host_group" "\$current_group"
+  else
+    echo "Host GID \$gid already belongs to \$current_group, expected \$host_group" >&2
+    exit 1
+  fi
+else
+  ${sudo_prefix} groupadd -g "\$gid" "\$host_group"
+fi
+
+if command -v nfsidmap >/dev/null 2>&1; then
+  ${sudo_prefix} nfsidmap -c >/dev/null 2>&1 || true
+fi
+
+echo "kerberos_host_nfs_group_ready group=\$host_group gid=\$gid"
 EOF
 }
 
@@ -981,6 +1100,46 @@ lookup_farm_nas_ad_identity_with_retry() {
   return 1
 }
 
+lookup_farm_nas_ad_group_gid() {
+  local groupname="$1"
+  local nas_host="${FARM_NAS_HOST:-192.168.2.30}"
+  local nas_port="${FARM_NAS_PORT:-6954}"
+  local nas_user="${FARM_NAS_USER:-jy}"
+  local nas_key="${FARM_NAS_SSH_KEY:-}"
+  local raw_command output gid
+
+  raw_command="$(build_farm_nas_lookup_ad_group_gid_command "$groupname")"
+  output="$(run_remote_raw_capture "$nas_host" "$nas_port" "$nas_user" "$nas_key" "$raw_command")" || return 1
+  gid="$(printf '%s\n' "$output" | tr -d '\r' | awk '/^[0-9]+$/ { print $1; found=1 } END { if (!found) exit 1 }')" || {
+    echo "Error: could not parse NAS AD group GID for ${groupname}" >&2
+    echo "$output" >&2
+    return 1
+  }
+
+  printf '%s\n' "$gid"
+}
+
+lookup_farm_nas_ad_group_gid_with_retry() {
+  local groupname="$1"
+  local attempts="${FARM_KERBEROS_NAS_IDENTITY_RETRIES:-12}"
+  local delay_seconds="${FARM_KERBEROS_NAS_IDENTITY_RETRY_DELAY:-5}"
+  local attempt output
+
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if output="$(lookup_farm_nas_ad_group_gid "$groupname")"; then
+      printf '%s\n' "$output"
+      return 0
+    fi
+
+    if ((attempt < attempts)); then
+      log_event "KERBEROS" "waiting_for_nas_ad_group_gid group=${groupname} attempt=${attempt}/${attempts}"
+      sleep "$delay_seconds"
+    fi
+  done
+
+  return 1
+}
+
 prepare_farm_kerberos_nas_user_home() {
   local username="$1"
   local nas_uid="$2"
@@ -1020,10 +1179,22 @@ if [ -n "\$(pidof idmapd 2>/dev/null || true)" ]; then
 fi
 ${sudo_prefix} "\$idmapd_bin"
 
+flush_epoch="\$(date +%s)"
+for cache_flush in \
+  /proc/net/rpc/auth.unix.gid/flush \
+  /proc/net/rpc/nfs4.idtoname/flush \
+  /proc/net/rpc/nfs4.nametoid/flush \
+  /proc/net/rpc/auth.rpcsec.init/flush \
+  /proc/net/rpc/auth.rpcsec.context/flush; do
+  if [ -e "\$cache_flush" ]; then
+    printf '%s' "\$flush_epoch" | ${sudo_prefix} tee "\$cache_flush" >/dev/null 2>&1 || true
+  fi
+done
+
 sleep 1
 pidof svcgssd >/dev/null
 pidof idmapd >/dev/null
-echo "kerberos_nas_gss_services_restarted"
+echo "kerberos_nas_gss_services_restarted_and_rpc_caches_flushed"
 EOF
 }
 
@@ -1055,6 +1226,28 @@ prepare_remote_kerberos_ccache_dir() {
 
   ccache_dir="$(farm_kerberos_ccache_dir "$uid")"
   raw_command="$(build_kerberos_ccache_dir_command "$ccache_dir" "$uid" "$gid")"
+  run_remote_shell "$host_alias" "$raw_command"
+}
+
+ensure_remote_kerberos_nfs_identity() {
+  local host_alias="$1"
+  local username="$2"
+  local uid="$3"
+  local groupname="$4"
+  local gid="$5"
+  local raw_command
+
+  raw_command="$(build_kerberos_host_nfs_identity_command "$username" "$uid" "$groupname" "$gid")"
+  run_remote_shell "$host_alias" "$raw_command"
+}
+
+ensure_remote_kerberos_nfs_group() {
+  local host_alias="$1"
+  local groupname="$2"
+  local gid="$3"
+  local raw_command
+
+  raw_command="$(build_kerberos_host_nfs_group_command "$groupname" "$gid")"
   run_remote_shell "$host_alias" "$raw_command"
 }
 
