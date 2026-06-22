@@ -68,6 +68,10 @@ function show_help {
   echo "      --vnc-password PASSWORD     Initial VNC password, max 8 chars (auto-generated if omitted when VNC is enabled)"
   echo "      --dry-run                   Show planned actions without changing remote hosts or DB"
   echo ""
+  echo "LAB storage home provisioning can be configured with LAB_STORAGE_HOST,"
+  echo "LAB_STORAGE_PORT, LAB_STORAGE_USER, LAB_STORAGE_SSH_KEY,"
+  echo "LAB_STORAGE_SSH_COMMON_ARGS, LAB_STORAGE_USER_SHARE_ROOT, LAB_STORAGE_SUDO,"
+  echo "and LAB_HOST_USER_SHARE_ROOT_TEMPLATE in config/db_config.local.env."
   echo "FARM NAS home provisioning can be configured with FARM_NAS_HOST,"
   echo "FARM_NAS_PORT, FARM_NAS_USER, FARM_NAS_SSH_KEY, FARM_NAS_USER_SHARE_ROOT,"
   echo "and FARM_NAS_SUDO in config/db_config.local.env."
@@ -467,8 +471,11 @@ if [ -n "$user_info" ]; then
   fi
 fi
 
+lab_storage_home_dir=""
 farm_nas_home_dir=""
-if [ "$domain_name" = "FARM" ]; then
+if [ "$domain_name" = "LAB" ]; then
+  lab_storage_home_dir="$(lab_storage_user_home_dir "$username")"
+elif [ "$domain_name" = "FARM" ]; then
   if [ "$enable_kerberos" = "true" ]; then
     farm_nas_home_dir="$(farm_kerberos_nas_user_home_dir "$username")"
   else
@@ -476,23 +483,29 @@ if [ "$domain_name" = "FARM" ]; then
   fi
 fi
 
-home_mount_source="/home/tako${server_number}/share/user-share/"
+if [ "$domain_name" = "LAB" ]; then
+  home_mount_source="$(lab_host_user_share_root "$server_number")/"
+else
+  home_mount_source="/home/tako${server_number}/share/user-share/"
+fi
 kerberos_ccache_dir=""
 kerberos_ccache_file=""
 kerberos_principal=""
 kerberos_keytab_file=""
 kerberos_refresh_env_file=""
 kerberos_krb5_conf="${FARM_KERBEROS_KRB5_CONF:-/etc/krb5.conf}"
-kerberos_ad_dc_host="${FARM_KERBEROS_AD_DC_HOST:-farm2}"
+kerberos_ad_dc_hosts="$(farm_kerberos_ad_dc_hosts | paste -sd ',' -)"
+kerberos_ad_dc_host="$(farm_kerberos_default_ad_dc_host)"
 kerberos_docker_params=""
 container_gid="$available_gid"
 
 if [ "$enable_kerberos" = "true" ]; then
-  if [ "$kerberos_ad_dc_host" != "$target_host" ]; then
-    echo "Error: --enable-kerberos keytab mode currently requires FARM_KERBEROS_AD_DC_HOST (${kerberos_ad_dc_host}) to match target host (${target_host})."
-    echo "Hint: for the current PoC, create Kerberos containers on ${kerberos_ad_dc_host}; cross-host keytab transfer is intentionally not automated yet."
+  if ! farm_kerberos_is_ad_dc_host "$target_host"; then
+    echo "Error: --enable-kerberos keytab mode requires target host (${target_host}) to be one of FARM_KERBEROS_AD_DC_HOSTS (${kerberos_ad_dc_hosts})."
+    echo "Hint: add ${target_host} to FARM_KERBEROS_AD_DC_HOSTS or create the Kerberos container on one of those DC hosts."
     exit 1
   fi
+  kerberos_ad_dc_host="$target_host"
   home_mount_source="$(farm_kerberos_mount_user_share_root)/"
   kerberos_ccache_dir="$(farm_kerberos_ccache_dir "$available_uid")"
   kerberos_ccache_file="$(farm_kerberos_ccache_file "$available_uid")"
@@ -588,6 +601,8 @@ if [ "$dry_run" = "true" ]; then
     echo "[DRY-RUN] Kerberos ccache file: ${kerberos_ccache_file}"
     echo "[DRY-RUN] Kerberos principal: ${kerberos_principal}"
     echo "[DRY-RUN] Kerberos host keytab: ${kerberos_keytab_file} (root:root 0400 on ${target_host})"
+    echo "[DRY-RUN] Kerberos AD DC hosts: ${kerberos_ad_dc_hosts}"
+    echo "[DRY-RUN] Kerberos AD operations host: ${kerberos_ad_dc_host}"
     echo "[DRY-RUN] Kerberos refresh env: ${kerberos_refresh_env_file} (root:root 0600 on ${target_host})"
     echo "[DRY-RUN] Kerberos keytab rotation requested: ${rotate_kerberos_keytab}"
     echo "[DRY-RUN] Kerberos krb5.conf bind source: ${kerberos_krb5_conf}"
@@ -611,6 +626,10 @@ if [ "$dry_run" = "true" ]; then
   else
     echo "[DRY-RUN] New group will be created: ${groupname} (${available_gid})"
   fi
+  if [ "$domain_name" = "LAB" ]; then
+    echo "[DRY-RUN] Would prepare LAB storage home: ${lab_storage_home_dir} (${available_uid}:${available_gid})"
+    echo "[DRY-RUN] LAB container home mount source: ${home_mount_source}"
+  fi
   if [ "$domain_name" = "FARM" ] && [ "$enable_kerberos" != "true" ]; then
     echo "[DRY-RUN] Would prepare FARM NAS home: ${farm_nas_home_dir} (${available_uid}:${available_gid})"
   fi
@@ -626,12 +645,31 @@ if ! run_remote_shell "$target_host" "docker image inspect dguailab/$container_i
   cleanup_and_exit "Failed to ensure Docker image on ${target_host}"
 fi
 
+if [ "$domain_name" = "LAB" ]; then
+  echo "Preparing LAB storage home ${lab_storage_home_dir} for ${username} (${available_uid}:${available_gid})..."
+  if ! prepare_lab_storage_user_home "$username" "$available_uid" "$available_gid"; then
+    cleanup_and_exit "Failed to prepare LAB storage home for ${username}"
+  fi
+fi
+
 if [ "$domain_name" = "FARM" ]; then
   if [ "$enable_kerberos" = "true" ]; then
     farm_nas_identity=""
+    if [ "$groupname" != "$username" ]; then
+      echo "Ensuring FARM AD group ${groupname} on $(farm_kerberos_default_ad_dc_host)..."
+      if ! ensure_farm_kerberos_ad_group "$(farm_kerberos_default_ad_dc_host)" "$groupname" "$available_gid"; then
+        cleanup_and_exit "Failed to prepare FARM Kerberos AD group ${groupname}"
+      fi
+      if ! sync_farm_kerberos_dc_from_dc "$kerberos_ad_dc_host" "$(farm_kerberos_default_ad_dc_host)"; then
+        cleanup_and_exit "Failed to sync FARM Kerberos AD group ${groupname} to ${kerberos_ad_dc_host}"
+      fi
+    fi
     echo "Ensuring FARM AD principal and host keytab for ${kerberos_principal} on ${kerberos_ad_dc_host}..."
     if ! ensure_farm_kerberos_keytab "$kerberos_ad_dc_host" "$username" "$kerberos_principal" "$kerberos_keytab_file" "$rotate_kerberos_keytab" "$available_uid" "$available_gid" "$groupname"; then
       cleanup_and_exit "Failed to prepare FARM Kerberos keytab for ${username}"
+    fi
+    if ! sync_farm_kerberos_primary_from_dc "$kerberos_ad_dc_host"; then
+      cleanup_and_exit "Failed to sync FARM Kerberos AD changes from ${kerberos_ad_dc_host} to $(farm_kerberos_default_ad_dc_host)"
     fi
     if [ "$groupname" != "$username" ]; then
       echo "Resolving FARM NAS AD-mapped group GID for ${groupname}..."

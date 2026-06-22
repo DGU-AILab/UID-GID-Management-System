@@ -207,7 +207,7 @@ require_mysqldump_cli() {
 
 ensure_ansible_host_exists() {
   local host_alias="$1"
-  local output
+  local output quoted_ssh_common_args
 
   if command -v ansible >/dev/null 2>&1; then
     output=$(ansible "$host_alias" -i "$ANSIBLE_INVENTORY" --list-hosts 2>/dev/null || true)
@@ -313,6 +313,7 @@ run_remote_raw_capture() {
   local user="$3"
   local key="$4"
   local raw_command="$5"
+  local ssh_common_args="${6:-}"
   local output
   local ansible_args=()
 
@@ -329,12 +330,32 @@ run_remote_raw_capture() {
     ansible_args+=(--private-key "$key")
   fi
 
+  if [ -n "$ssh_common_args" ]; then
+    quoted_ssh_common_args="$(shell_quote "$ssh_common_args")"
+    ansible_args+=(-e "ansible_ssh_common_args=${quoted_ssh_common_args}")
+  fi
+
   if ! output=$(ansible "${ansible_args[@]}" 2>&1); then
     echo "$output" >&2
     return 1
   fi
 
   printf '%s\n' "$output"
+}
+
+lab_storage_user_home_dir() {
+  local username="$1"
+  local share_root="${LAB_STORAGE_USER_SHARE_ROOT:-/294t/dcloud/share/user-share}"
+  share_root="${share_root%/}"
+  printf '%s/%s\n' "$share_root" "$username"
+}
+
+lab_host_user_share_root() {
+  local server_number="$1"
+  local share_root_template="${LAB_HOST_USER_SHARE_ROOT_TEMPLATE:-/home/tako{server_number}/share/user-share}"
+  share_root_template="${share_root_template//\{server_number\}/$server_number}"
+  share_root_template="${share_root_template%/}"
+  printf '%s\n' "$share_root_template"
 }
 
 farm_nas_user_home_dir() {
@@ -373,6 +394,59 @@ farm_kerberos_realm() {
   printf '%s\n' "${FARM_KERBEROS_REALM:-FARM.DECS.INTERNAL}"
 }
 
+farm_kerberos_ad_dc_hosts() {
+  local raw_hosts="${FARM_KERBEROS_AD_DC_HOSTS:-${FARM_KERBEROS_AD_DC_HOST:-farm2}}"
+  raw_hosts="${raw_hosts//,/ }"
+  # shellcheck disable=SC2086
+  printf '%s\n' $raw_hosts
+}
+
+farm_kerberos_default_ad_dc_host() {
+  farm_kerberos_ad_dc_hosts | head -n 1
+}
+
+farm_kerberos_domain_fqdn() {
+  farm_kerberos_realm | tr '[:upper:]' '[:lower:]'
+}
+
+farm_kerberos_domain_dn() {
+  local fqdn part dn=""
+  fqdn="$(farm_kerberos_domain_fqdn)"
+  IFS='.' read -ra parts <<<"$fqdn"
+  for part in "${parts[@]}"; do
+    if [ -n "$dn" ]; then
+      dn+=","
+    fi
+    dn+="DC=${part}"
+  done
+  printf '%s\n' "$dn"
+}
+
+farm_kerberos_ad_dc_fqdn() {
+  local host_alias="$1"
+  local default_host domain
+  default_host="$(farm_kerberos_default_ad_dc_host)"
+  domain="$(farm_kerberos_domain_fqdn)"
+  if [[ "$host_alias" == *.* ]]; then
+    printf '%s\n' "$host_alias"
+  elif [ "$host_alias" = "$default_host" ] && [ "$host_alias" = "farm2" ]; then
+    printf 'dc1.%s\n' "$domain"
+  else
+    printf '%s.%s\n' "$host_alias" "$domain"
+  fi
+}
+
+farm_kerberos_is_ad_dc_host() {
+  local candidate="$1"
+  local host
+  while IFS= read -r host; do
+    if [ "$host" = "$candidate" ]; then
+      return 0
+    fi
+  done < <(farm_kerberos_ad_dc_hosts)
+  return 1
+}
+
 farm_kerberos_principal() {
   local username="$1"
   printf '%s@%s\n' "$username" "$(farm_kerberos_realm)"
@@ -400,11 +474,11 @@ farm_kerberos_refresh_env_file() {
   printf '%s/%s.env\n' "$(farm_kerberos_refresh_env_dir)" "$username"
 }
 
-build_farm_nas_prepare_home_command() {
+build_remote_storage_prepare_home_command() {
   local home_dir="$1"
   local uid="$2"
   local gid="$3"
-  local sudo_prefix="${FARM_NAS_SUDO-sudo -n}"
+  local sudo_prefix="${4-sudo -n}"
   local quoted_home quoted_owner
 
   quoted_home="$(shell_quote "$home_dir")"
@@ -416,6 +490,20 @@ ${sudo_prefix} mkdir -p ${quoted_home}
 ${sudo_prefix} chown ${quoted_owner} ${quoted_home}
 ${sudo_prefix} chmod 750 ${quoted_home}
 EOF
+}
+
+build_lab_storage_prepare_home_command() {
+  local home_dir="$1"
+  local uid="$2"
+  local gid="$3"
+  build_remote_storage_prepare_home_command "$home_dir" "$uid" "$gid" "${LAB_STORAGE_SUDO-sudo -n}"
+}
+
+build_farm_nas_prepare_home_command() {
+  local home_dir="$1"
+  local uid="$2"
+  local gid="$3"
+  build_remote_storage_prepare_home_command "$home_dir" "$uid" "$gid" "${FARM_NAS_SUDO-sudo -n}"
 }
 
 build_farm_kerberos_keytab_command() {
@@ -848,8 +936,13 @@ build_farm_nas_lookup_ad_group_gid_command() {
   cat <<EOF
 set -eu
 wbinfo_bin=/usr/local/packages/@appstore/SMBService/usr/bin/wbinfo
-entry="\$("\$wbinfo_bin" --group-info ${quoted_identity})"
-printf '%s\n' "\$entry" | awk -F: '{ print \$3 }'
+if entry="\$("\$wbinfo_bin" --group-info ${quoted_identity} 2>/dev/null)"; then
+  printf '%s\n' "\$entry" | awk -F: '{ print \$3 }'
+  exit 0
+fi
+sid_line="\$("\$wbinfo_bin" --name-to-sid ${quoted_identity})"
+sid="\$(printf '%s\n' "\$sid_line" | awk '{ print \$1 }')"
+"\$wbinfo_bin" --sid-to-gid "\$sid"
 EOF
 }
 
@@ -1030,6 +1123,22 @@ exit 1
 EOF
 }
 
+prepare_lab_storage_user_home() {
+  local username="$1"
+  local uid="$2"
+  local gid="$3"
+  local storage_host="${LAB_STORAGE_HOST:-192.168.1.20}"
+  local storage_port="${LAB_STORAGE_PORT:-6953}"
+  local storage_user="${LAB_STORAGE_USER:-jy}"
+  local storage_key="${LAB_STORAGE_SSH_KEY:-}"
+  local storage_ssh_common_args="${LAB_STORAGE_SSH_COMMON_ARGS:-}"
+  local storage_home_dir raw_command
+
+  storage_home_dir="$(lab_storage_user_home_dir "$username")"
+  raw_command="$(build_lab_storage_prepare_home_command "$storage_home_dir" "$uid" "$gid")"
+  run_remote_raw_capture "$storage_host" "$storage_port" "$storage_user" "$storage_key" "$raw_command" "$storage_ssh_common_args"
+}
+
 prepare_farm_nas_user_home() {
   local username="$1"
   local uid="$2"
@@ -1039,25 +1148,11 @@ prepare_farm_nas_user_home() {
   local nas_user="${FARM_NAS_USER:-jy}"
   local nas_key="${FARM_NAS_SSH_KEY:-}"
   local nas_home_dir raw_command
-  local ansible_args=()
 
   nas_home_dir="$(farm_nas_user_home_dir "$username")"
   raw_command="$(build_farm_nas_prepare_home_command "$nas_home_dir" "$uid" "$gid")"
 
-  ansible_args=(
-    "$nas_host"
-    -i "${nas_host},"
-    -u "$nas_user"
-    -e "ansible_port=${nas_port}"
-    -m raw
-    -a "$raw_command"
-  )
-
-  if [ -n "$nas_key" ]; then
-    ansible_args+=(--private-key "$nas_key")
-  fi
-
-  ansible "${ansible_args[@]}"
+  run_remote_raw_capture "$nas_host" "$nas_port" "$nas_user" "$nas_key" "$raw_command"
 }
 
 lookup_farm_nas_ad_identity() {
@@ -1264,6 +1359,28 @@ ensure_farm_kerberos_keytab() {
 
   raw_command="$(build_farm_kerberos_keytab_command "$username" "$principal" "$keytab_file" "$rotate_keytab" "$uid" "$gid" "$groupname")"
   run_remote_shell "$host_alias" "$raw_command"
+}
+
+sync_farm_kerberos_dc_from_dc() {
+  local destination_host_alias="$1"
+  local source_host_alias="$2"
+  local source_fqdn destination_fqdn domain_dn raw_command
+
+  if [ "$source_host_alias" = "$destination_host_alias" ]; then
+    return 0
+  fi
+
+  source_fqdn="$(farm_kerberos_ad_dc_fqdn "$source_host_alias")"
+  destination_fqdn="$(farm_kerberos_ad_dc_fqdn "$destination_host_alias")"
+  domain_dn="$(farm_kerberos_domain_dn)"
+  raw_command="set -eu
+${KERBEROS_REMOTE_SUDO:-sudo -n} samba-tool drs replicate $(shell_quote "$destination_fqdn") $(shell_quote "$source_fqdn") $(shell_quote "$domain_dn") --local --full-sync -P >/dev/null
+echo kerberos_ad_dc_synced"
+  run_remote_shell "$destination_host_alias" "$raw_command"
+}
+
+sync_farm_kerberos_primary_from_dc() {
+  sync_farm_kerberos_dc_from_dc "$(farm_kerberos_default_ad_dc_host)" "$1"
 }
 
 install_farm_kerberos_host_refresh() {

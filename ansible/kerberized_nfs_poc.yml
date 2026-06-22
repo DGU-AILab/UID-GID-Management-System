@@ -13,6 +13,7 @@
     kerb_nfs_mount_options: "vers=4.1,sec={{ kerb_nfs_sec }},hard,proto=tcp,_netdev"
     kerb_nfs_write_test: false
     kerb_nfs_write_test_file: farm2_krb5p_mount_test.txt
+    kerb_nfs_write_krb5_conf: true
     kerb_realm: EXAMPLE.COM
     kerb_kdc: kdc.example.com
     kerb_admin_server: "{{ kerb_kdc }}"
@@ -112,6 +113,7 @@
           [domain_realm]
             .{{ kerb_domain }} = {{ kerb_realm }}
             {{ kerb_domain }} = {{ kerb_realm }}
+      when: kerb_nfs_write_krb5_conf | bool
 
     - name: Ensure rpc-gssd is enabled
       become: true
@@ -136,8 +138,8 @@
       become: true
       ansible.builtin.shell: |
         set -euo pipefail
-        if findmnt -T {{ kerb_nfs_mount_point | quote }} >/dev/null 2>&1; then
-          findmnt -T {{ kerb_nfs_mount_point | quote }} -o TARGET,SOURCE,FSTYPE,OPTIONS
+        if findmnt --mountpoint {{ kerb_nfs_mount_point | quote }} >/dev/null 2>&1; then
+          findmnt --mountpoint {{ kerb_nfs_mount_point | quote }} -o TARGET,SOURCE,FSTYPE,OPTIONS
           exit 0
         fi
         mount -t {{ kerb_nfs_fstype | quote }} \
@@ -145,14 +147,14 @@
           {{ (kerb_nfs_server_fqdn ~ ':' ~ kerb_nfs_export) | quote }} \
           {{ kerb_nfs_mount_point | quote }}
         echo MOUNTED
-        findmnt -T {{ kerb_nfs_mount_point | quote }} -o TARGET,SOURCE,FSTYPE,OPTIONS
+        findmnt --mountpoint {{ kerb_nfs_mount_point | quote }} -o TARGET,SOURCE,FSTYPE,OPTIONS
       args:
         executable: /bin/bash
       register: kerb_mount_result
       changed_when: "'MOUNTED' in kerb_mount_result.stdout"
 
     - name: Verify mounted security option
-      ansible.builtin.shell: "findmnt -T {{ kerb_nfs_mount_point | quote }} -no OPTIONS"
+      ansible.builtin.shell: "findmnt --mountpoint {{ kerb_nfs_mount_point | quote }} -no OPTIONS"
       register: mounted_options
       changed_when: false
       failed_when: "'sec=' ~ kerb_nfs_sec not in mounted_options.stdout"

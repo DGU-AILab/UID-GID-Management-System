@@ -14,7 +14,7 @@ groupname=""
 username=""
 users_csv=""
 requested_gid=""
-ad_host="${FARM_KERBEROS_AD_DC_HOST:-farm2}"
+ad_host="$(farm_kerberos_default_ad_dc_host)"
 primary=false
 force=false
 dry_run=false
@@ -38,7 +38,7 @@ Options:
       --users u1,u2          Comma-separated users for repeated add/remove
       --gid GID              Explicit GID when creating a group
       --domain FARM          Domain. Kerberos AD group management is FARM-only
-      --ad-host HOST         Ansible host alias for Samba AD DC, default FARM_KERBEROS_AD_DC_HOST or farm2
+      --ad-host HOST         Ansible host alias for Samba AD DC, default first FARM_KERBEROS_AD_DC_HOSTS entry
       --primary              With add-user, also set the user's primary group
       --force                Delete supplemental memberships before deleting group
       --dry-run              Print the plan without changing DB or AD

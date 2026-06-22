@@ -1,0 +1,306 @@
+---
+- name: Read FARM AD administrator password from the existing DC
+  hosts: "{{ source_dc | default('farm2') }}"
+  gather_facts: false
+  vars:
+    ad_admin_password_file: /root/samba-ad-dc-poc.adminpass
+  tasks:
+    - name: Read root-only AD administrator password
+      become: true
+      ansible.builtin.slurp:
+        src: "{{ ad_admin_password_file }}"
+      register: ad_admin_password_slurp
+      no_log: true
+
+    - name: Store AD administrator password for later plays
+      ansible.builtin.set_fact:
+        decs_ad_admin_password: "{{ ad_admin_password_slurp.content | b64decode | trim }}"
+      no_log: true
+
+- name: Join additional FARM Samba AD DCs
+  hosts: "{{ target_hosts }}"
+  gather_facts: false
+  vars:
+    source_dc: farm2
+    source_dc_netbios_name: DC1
+    source_dc_fqdn: dc1.farm.decs.internal
+    source_dc_service_ip: 100.100.100.102
+    ad_realm: FARM.DECS.INTERNAL
+    ad_dns_domain: farm.decs.internal
+    ad_netbios_domain: FARM
+    ad_dns_forwarder: 210.94.190.7
+    ad_samba_interfaces: lo eno1np0
+    nas_fqdn: nas.farm.decs.internal
+    nas_storage_ip: 100.100.100.120
+    dc_service_ip_by_host:
+      farm6: 100.100.100.106
+      farm7: 100.100.100.107
+    dc_management_ip_by_host:
+      farm6: 192.168.2.16
+      farm7: 192.168.2.17
+    all_dc_hosts:
+      - name: dc1
+        fqdn: dc1.farm.decs.internal
+        ip: 100.100.100.102
+      - name: farm6
+        fqdn: farm6.farm.decs.internal
+        ip: 100.100.100.106
+      - name: farm7
+        fqdn: farm7.farm.decs.internal
+        ip: 100.100.100.107
+
+  tasks:
+    - name: Validate target host has a configured service IP
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname in dc_service_ip_by_host
+        fail_msg: "Set dc_service_ip_by_host for {{ inventory_hostname }}"
+
+    - name: Install Samba AD DC packages
+      become: true
+      ansible.builtin.apt:
+        name:
+          - acl
+          - attr
+          - dnsutils
+          - krb5-user
+          - nfs-common
+          - samba
+          - winbind
+        state: present
+        update_cache: true
+
+    - name: Add FARM AD host aliases
+      become: true
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} DECS FARM AD DC HOSTS"
+        block: |
+          {% for dc in all_dc_hosts %}
+          {{ dc.ip }} {{ dc.fqdn }} {{ dc.name }}
+          {% endfor %}
+          {{ nas_storage_ip }} {{ nas_fqdn }} nas
+
+    - name: Install Kerberos client config with all known DCs
+      become: true
+      ansible.builtin.copy:
+        dest: /etc/krb5.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [libdefaults]
+            default_realm = {{ ad_realm }}
+            dns_lookup_realm = false
+            dns_lookup_kdc = false
+            rdns = false
+            ticket_lifetime = 24h
+            renew_lifetime = 7d
+            forwardable = true
+
+          [realms]
+            {{ ad_realm }} = {
+          {% for dc in all_dc_hosts %}
+              kdc = {{ dc.ip }}
+          {% endfor %}
+              admin_server = {{ source_dc_service_ip }}
+              default_domain = {{ ad_dns_domain }}
+            }
+
+          [domain_realm]
+            .{{ ad_dns_domain }} = {{ ad_realm }}
+            {{ ad_dns_domain }} = {{ ad_realm }}
+
+    - name: Check existing Samba AD database
+      become: true
+      ansible.builtin.stat:
+        path: /var/lib/samba/private/sam.ldb
+      register: samba_ad_db
+
+    - name: Stop non-AD Samba services before join
+      become: true
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      failed_when: false
+      loop:
+        - smbd
+        - nmbd
+        - winbind
+      when: not samba_ad_db.stat.exists
+
+    - name: Stop AD DC service before first join
+      become: true
+      ansible.builtin.systemd:
+        name: samba-ad-dc
+        state: stopped
+      failed_when: false
+      when: not samba_ad_db.stat.exists
+
+    - name: Back up package default smb.conf before join
+      become: true
+      ansible.builtin.command:
+        cmd: mv /etc/samba/smb.conf /etc/samba/smb.conf.before-ad-join
+        creates: /etc/samba/smb.conf.before-ad-join
+        removes: /etc/samba/smb.conf
+      when: not samba_ad_db.stat.exists
+
+    - name: Join target as an additional AD DC
+      become: true
+      ansible.builtin.shell: |
+        set -euo pipefail
+        admin_pass={{ hostvars[source_dc].decs_ad_admin_password | quote }}
+        samba-tool domain join {{ ad_realm | quote }} DC \
+          -U "{{ ad_netbios_domain }}\\Administrator%${admin_pass}" \
+          --realm={{ ad_realm | quote }} \
+          --dns-backend=SAMBA_INTERNAL \
+          --server={{ source_dc_fqdn | quote }} \
+          --option="interfaces = {{ ad_samba_interfaces }}" \
+          --option="bind interfaces only = yes" \
+          --option="dns forwarder = {{ ad_dns_forwarder }}"
+      args:
+        executable: /bin/bash
+        creates: /var/lib/samba/private/sam.ldb
+      no_log: true
+      when: not samba_ad_db.stat.exists
+
+    - name: Ensure Samba AD interface binding is present
+      become: true
+      ansible.builtin.blockinfile:
+        path: /etc/samba/smb.conf
+        insertafter: '^\[global\]'
+        marker: "# {mark} DECS FARM AD DC"
+        block: |
+          interfaces = {{ ad_samba_interfaces }}
+          bind interfaces only = yes
+          dns forwarder = {{ ad_dns_forwarder }}
+
+    - name: Normalize Samba interface binding line
+      become: true
+      ansible.builtin.replace:
+        path: /etc/samba/smb.conf
+        regexp: '^\s*interfaces\s*=.*$'
+        replace: "interfaces = {{ ad_samba_interfaces }}"
+
+    - name: Enable Samba AD DC service
+      become: true
+      ansible.builtin.systemd:
+        name: samba-ad-dc
+        masked: false
+        enabled: true
+        state: restarted
+
+    - name: Wait for local Samba DNS, Kerberos, and LDAP ports
+      ansible.builtin.wait_for:
+        host: "{{ dc_service_ip_by_host[inventory_hostname] }}"
+        port: "{{ item }}"
+        timeout: 45
+      loop:
+        - 53
+        - 88
+        - 389
+
+    - name: Ensure NAS DNS record exists on local DC
+      become: true
+      ansible.builtin.shell: |
+        set -euo pipefail
+        admin_pass={{ hostvars[source_dc].decs_ad_admin_password | quote }}
+        if samba-tool dns query 127.0.0.1 {{ ad_dns_domain | quote }} nas A -U "Administrator%${admin_pass}" >/dev/null 2>&1; then
+          exit 0
+        fi
+        samba-tool dns add 127.0.0.1 {{ ad_dns_domain | quote }} nas A {{ nas_storage_ip | quote }} -U "Administrator%${admin_pass}"
+      args:
+        executable: /bin/bash
+      register: nas_dns_record
+      changed_when: "'Record added successfully' in nas_dns_record.stdout"
+      no_log: true
+
+    - name: Ensure NFS SPNs exist on this DC computer account
+      become: true
+      ansible.builtin.shell: |
+        set -euo pipefail
+        account="$(hostname -s | tr '[:lower:]' '[:upper:]')$"
+        short="$(hostname -s | tr '[:lower:]' '[:upper:]')"
+        fqdn="$(hostname -s | tr '[:upper:]' '[:lower:]').{{ ad_dns_domain }}"
+        for spn in "nfs/${short}" "nfs/${fqdn}"; do
+          samba-tool spn add "$spn" "$account" >/dev/null 2>&1 || true
+        done
+        samba-tool spn list "$account"
+      args:
+        executable: /bin/bash
+      register: nfs_spn_result
+      changed_when: false
+
+    - name: Export machine keytab for rpc.gssd
+      become: true
+      ansible.builtin.shell: |
+        set -euo pipefail
+        short="$(hostname -s | tr '[:lower:]' '[:upper:]')"
+        principal="${short}\$@{{ ad_realm }}"
+        if [ -s /etc/krb5.keytab ] && kinit -k -t /etc/krb5.keytab "$principal" >/dev/null 2>&1; then
+          kdestroy >/dev/null 2>&1 || true
+          exit 0
+        fi
+        tmp_keytab=/etc/krb5.keytab.decs-new
+        rm -f "$tmp_keytab"
+        samba-tool domain exportkeytab "$tmp_keytab" --principal="${short}\$"
+        install -o root -g root -m 0600 "$tmp_keytab" /etc/krb5.keytab
+        rm -f "$tmp_keytab"
+        kinit -k -t /etc/krb5.keytab "$principal"
+        kdestroy
+      args:
+        executable: /bin/bash
+      register: machine_keytab
+      changed_when: "'Export one principal' in machine_keytab.stdout"
+
+    - name: Ensure rpc-gssd is running
+      become: true
+      ansible.builtin.systemd:
+        name: rpc-gssd
+        enabled: true
+        state: restarted
+
+    - name: Force initial DRS full sync from the source DC
+      become: true
+      ansible.builtin.shell: |
+        set -euo pipefail
+        destination="$(hostname -s | tr '[:upper:]' '[:lower:]').{{ ad_dns_domain }}"
+        for naming_context in \
+          "DC={{ ad_dns_domain.split('.')[0] }},DC={{ ad_dns_domain.split('.')[1] }},DC={{ ad_dns_domain.split('.')[2] }}" \
+          "CN=Configuration,DC={{ ad_dns_domain.split('.')[0] }},DC={{ ad_dns_domain.split('.')[1] }},DC={{ ad_dns_domain.split('.')[2] }}" \
+          "CN=Schema,CN=Configuration,DC={{ ad_dns_domain.split('.')[0] }},DC={{ ad_dns_domain.split('.')[1] }},DC={{ ad_dns_domain.split('.')[2] }}" \
+          "DC=DomainDnsZones,DC={{ ad_dns_domain.split('.')[0] }},DC={{ ad_dns_domain.split('.')[1] }},DC={{ ad_dns_domain.split('.')[2] }}" \
+          "DC=ForestDnsZones,DC={{ ad_dns_domain.split('.')[0] }},DC={{ ad_dns_domain.split('.')[1] }},DC={{ ad_dns_domain.split('.')[2] }}"; do
+          samba-tool drs replicate "$destination" {{ source_dc_fqdn | quote }} "$naming_context" --local --full-sync -P
+        done
+      args:
+        executable: /bin/bash
+      register: initial_drs_sync
+      changed_when: "'Full Replication' in initial_drs_sync.stdout"
+
+    - name: Run local DC smoke tests
+      become: true
+      ansible.builtin.shell: |
+        set -euo pipefail
+        samba-tool domain info 127.0.0.1
+        samba-tool drs showrepl
+        host -t SRV _ldap._tcp.{{ ad_dns_domain }} 127.0.0.1
+        host "$(hostname -s).{{ ad_dns_domain }}" 127.0.0.1
+        printf '%s\n' {{ hostvars[source_dc].decs_ad_admin_password | quote }} | kinit administrator
+        klist
+        kdestroy
+      args:
+        executable: /bin/bash
+      register: dc_smoke
+      changed_when: false
+      no_log: true
+
+    - name: Print additional DC summary
+      ansible.builtin.debug:
+        msg:
+          - "host={{ inventory_hostname }}"
+          - "service_ip={{ dc_service_ip_by_host[inventory_hostname] }}"
+          - "realm={{ ad_realm }}"
+          - "dns_domain={{ ad_dns_domain }}"
+          - "nfs_spns={{ nfs_spn_result.stdout_lines }}"

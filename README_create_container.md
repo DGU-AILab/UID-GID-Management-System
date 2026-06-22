@@ -1,5 +1,44 @@
 # create_container.sh Notes
 
+## LAB Storage Root Squash Provisioning
+
+LAB is not a Synology NAS path. In this repository it is treated as a separate
+storage server.
+
+If LAB storage enables root_squash, a container root process cannot create a
+new user's home directory on the NFS export. For that case,
+`script/create_container.sh` prepares the directory on the storage server
+before creating the Docker container or DB rows.
+
+The LAB flow uses raw Ansible SSH to run:
+
+```bash
+mkdir -p /294t/dcloud/share/user-share/<username>
+chown <uid>:<gid> /294t/dcloud/share/user-share/<username>
+chmod 750 /294t/dcloud/share/user-share/<username>
+```
+
+Default settings:
+
+```text
+LAB_STORAGE_HOST=192.168.1.20
+LAB_STORAGE_PORT=6953
+LAB_STORAGE_USER=jy
+LAB_STORAGE_USER_SHARE_ROOT=/294t/dcloud/share/user-share
+LAB_STORAGE_SUDO="sudo -n"
+LAB_HOST_USER_SHARE_ROOT_TEMPLATE=/home/tako{server_number}/share/user-share
+```
+
+`LAB_STORAGE_USER_SHARE_ROOT` is the real path on the storage server.
+`LAB_HOST_USER_SHARE_ROOT_TEMPLATE` is the NFS mount path seen by each LAB
+Docker host and is what gets bind-mounted into the container as `/home`.
+
+If storage SSH must go through a jump host, set:
+
+```text
+LAB_STORAGE_SSH_COMMON_ARGS="-o ProxyJump=jy@192.168.1.12:8082"
+```
+
 ## FARM Kerberos NFS Cache Refresh
 
 FARM Kerberos mode is not only a Docker container creation flow. When a new

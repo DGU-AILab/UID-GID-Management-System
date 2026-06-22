@@ -1,0 +1,42 @@
+---
+- name: Refresh Synology Kerberos NFS identity services
+  hosts: "{{ nas_host }}"
+  gather_facts: false
+  vars:
+    ansible_port: "{{ nas_port | default(6954) }}"
+    ansible_user: "{{ nas_user | default('jy') }}"
+    nas_sudo: "{{ nas_sudo | default('sudo -n') }}"
+    svcgssd_bin: "{{ svcgssd_bin | default('/usr/sbin/svcgssd') }}"
+    idmapd_bin: "{{ idmapd_bin | default('/usr/sbin/idmapd') }}"
+    nfs_principal: "{{ nfs_principal | default('nfs/nas.farm.decs.internal@FARM.DECS.INTERNAL') }}"
+  tasks:
+    - name: Restart svcgssd/idmapd and flush RPC caches
+      ansible.builtin.raw: |
+        set -eu
+        if [ -n "$(pidof svcgssd 2>/dev/null || true)" ]; then
+          {{ nas_sudo }} kill $(pidof svcgssd)
+          sleep 1
+        fi
+        {{ nas_sudo }} "{{ svcgssd_bin }}" -p "{{ nfs_principal }}"
+
+        if [ -n "$(pidof idmapd 2>/dev/null || true)" ]; then
+          {{ nas_sudo }} kill $(pidof idmapd)
+          sleep 1
+        fi
+        {{ nas_sudo }} "{{ idmapd_bin }}"
+
+        flush_epoch="$(date +%s)"
+        for cache_flush in \
+          /proc/net/rpc/auth.unix.gid/flush \
+          /proc/net/rpc/nfs4.idtoname/flush \
+          /proc/net/rpc/nfs4.nametoid/flush \
+          /proc/net/rpc/auth.rpcsec.init/flush \
+          /proc/net/rpc/auth.rpcsec.context/flush; do
+          if [ -e "$cache_flush" ]; then
+            printf '%s' "$flush_epoch" | {{ nas_sudo }} tee "$cache_flush" >/dev/null 2>&1 || true
+          fi
+        done
+
+        pidof svcgssd >/dev/null
+        pidof idmapd >/dev/null
+        echo kerberos_nas_gss_services_restarted_and_rpc_caches_flushed

@@ -94,10 +94,10 @@ bash script/create_container.sh \
 3. 관리 서버에서 MySQL 접속 확인. dry-run도 DB 읽기 필요.
 4. DB의 `used_ports` 조회 후 포트 배정. 서버 번호 `N` 의 포트 블록은 `9000 + 100 * (N - 1)` 부터 `9000 + 100 * N - 1` 까지. SSH `22`, Jupyter `8888` 에 외부 포트 2개 우선 배정. VNC와 추가 포트는 남은 포트 순차 배정.
 5. DB의 `user`, `group`, `used_ids`, `user_group_membership` 조회 후 UID/GID 결정. 기존 username은 UID 재사용. 신규 username은 `used_ids` 최댓값 다음 번호 사용. group이 비어 있으면 username을 group으로 사용. 기존 user의 supplemental group은 컨테이너에 `DECS_SUPPLEMENTAL_GROUPS`로 전달한다.
-6. `--dry-run` 인 경우 원격 Docker 실행, FARM NAS 홈 생성, DB 쓰기, 백업, export, 메일 발송 없이 계획만 출력 후 종료.
+6. `--dry-run` 인 경우 원격 Docker 실행, LAB storage/FARM NAS 홈 생성, DB 쓰기, 백업, export, 메일 발송 없이 계획만 출력 후 종료.
 7. 대상 서버에서 Ansible shell로 `docker image inspect dguailab/<image>:<version>` 실행. 이미지가 없으면 `docker pull`.
 8. FARM Kerberos 모드면 AD principal을 확인/생성하고 target host에 사용자별 keytab을 `root:root 0400`으로 export한다. `--group`이 username과 다르면 같은 이름의 AD group을 만들거나 갱신하고, `gidNumber/msSFU30*`와 user membership도 보장한다. `--rotate-kerberos-keytab true`면 AD password를 재설정한 뒤 keytab을 새로 export한다.
-9. FARM이면 NAS에 raw Ansible SSH로 접속해 홈 디렉토리를 미리 생성한다. 일반 모드는 `FARM_NAS_USER_SHARE_ROOT/<username>`을 컨테이너 `UID:GID`, `750` 권한으로 만든다. Kerberos 모드는 `FARM_KERBEROS_NAS_USER_SHARE_ROOT/<username>`을 NAS의 AD-mapped UID/GID, `750` 권한으로 만든다.
+9. LAB이면 storage 서버에 raw Ansible SSH로 접속해 `LAB_STORAGE_USER_SHARE_ROOT/<username>`을 컨테이너 `UID:GID`, `750` 권한으로 미리 생성한다. FARM이면 NAS에 raw Ansible SSH로 접속해 홈 디렉토리를 미리 생성한다. FARM 일반 모드는 `FARM_NAS_USER_SHARE_ROOT/<username>`을 컨테이너 `UID:GID`, `750` 권한으로 만든다. FARM Kerberos 모드는 `FARM_KERBEROS_NAS_USER_SHARE_ROOT/<username>`을 NAS의 AD-mapped UID/GID, `750` 권한으로 만든다.
 10. FARM Kerberos 모드면 NAS `svcgssd`/`idmapd`를 재시작하고 `/proc/net/rpc/*/flush`를 갱신해 Synology Kerberos NFS owner/group mapping cache를 비운다. 이 동작은 `FARM_KERBEROS_NAS_RESTART_GSS_SERVICES=false`로 비활성화할 수 있다.
 11. FARM Kerberos 모드에서 AD group을 쓰면 target host의 NFSv4 idmapper가 `FARM\<group>`을 해석할 수 있도록 host local group/user shadow entry를 준비한다. 컨테이너 runtime GID는 DB GID가 아니라 NAS AD-mapped group GID를 사용한다.
 12. FARM Kerberos 모드면 target host에 `/usr/local/sbin/decs-krb-refresh`, `decs-krb-refresh@<username>.timer`, root-only refresh env를 설치하고 `/run/user/<uid>/krb5cc` ticket을 `kinit -kt`로 발급한다.
@@ -475,6 +475,13 @@ DB_HOST=127.0.0.1
 ANSIBLE_INVENTORY=/home/jy/ansible/inventory.ini
 BACKUP_ROOT_DIR=/home/jy/uid/mysql_backups
 
+LAB_STORAGE_HOST=192.168.1.20
+LAB_STORAGE_PORT=6953
+LAB_STORAGE_USER=jy
+LAB_STORAGE_USER_SHARE_ROOT=/294t/dcloud/share/user-share
+LAB_STORAGE_SUDO="sudo -n"
+LAB_HOST_USER_SHARE_ROOT_TEMPLATE=/home/tako{server_number}/share/user-share
+
 FARM_NAS_HOST=192.168.2.30
 FARM_NAS_PORT=6954
 FARM_NAS_USER=jy
@@ -520,6 +527,12 @@ SERVER_DOMAIN=LAB
 | `DB_HOST` | 일부 legacy/maintenance 스크립트용 단일 DB host fallback. LAB/FARM 분리 운영에서는 `LAB_DB_HOST`, `FARM_DB_HOST` 우선. |
 | `ANSIBLE_INVENTORY` | create/delete가 원격 Docker 명령을 실행할 Ansible inventory 절대 경로. |
 | `BACKUP_ROOT_DIR` | create/delete 성공 후 `mysqldump` 백업 저장용 관리 서버 로컬 디렉토리. 생략 시 `mysql_backups/` 사용. |
+| `LAB_STORAGE_HOST`, `LAB_STORAGE_PORT`, `LAB_STORAGE_USER` | LAB 컨테이너 생성 전 사용자 홈 디렉토리를 미리 만들 storage 서버 SSH 접속 정보. |
+| `LAB_STORAGE_SSH_KEY` | LAB storage 접속에 사용할 SSH private key. 생략 시 SSH 기본 키 사용. |
+| `LAB_STORAGE_SSH_COMMON_ARGS` | LAB storage 접속에 ProxyJump 같은 추가 SSH 옵션이 필요할 때 사용. 예: `-o ProxyJump=jy@192.168.1.12:8082`. |
+| `LAB_STORAGE_USER_SHARE_ROOT` | LAB storage 서버의 실제 사용자 홈 root. 기본값: `/294t/dcloud/share/user-share`. |
+| `LAB_STORAGE_SUDO` | LAB storage에서 `mkdir/chown/chmod` 앞에 붙일 명령. 기본값: `sudo -n`. |
+| `LAB_HOST_USER_SHARE_ROOT_TEMPLATE` | LAB Docker host에서 컨테이너 `/home`으로 bind mount할 NFS mount root template. `{server_number}`가 LAB 번호로 치환된다. 기본값: `/home/tako{server_number}/share/user-share`. |
 | `FARM_NAS_HOST`, `FARM_NAS_PORT`, `FARM_NAS_USER` | FARM 컨테이너 생성 전 사용자 홈 디렉토리를 미리 만들 NAS SSH 접속 정보. |
 | `FARM_NAS_SSH_KEY` | FARM NAS 접속에 사용할 SSH private key. 생략 시 SSH 기본 키 사용. |
 | `FARM_NAS_USER_SHARE_ROOT` | FARM 서버의 `/home/takoN/share/user-share/` 에 대응하는 NAS 실제 경로. 기본값: `/volume1/share/user-share`. |
@@ -592,8 +605,14 @@ ansible lab10 -i /home/jy/ansible/inventory.ini -m shell -a "docker ps"
 - `ansible_user` 의 passwordless SSH 접속 가능.
 - `ansible_user` 의 `sudo` 없는 `docker` 명령 실행 가능.
 - GPU 컨테이너 생성에 필요한 Docker/NVIDIA runtime 준비.
-- create 스크립트는 `/home/tako서버번호/share/user-share/` 를 컨테이너 `/home/` 에 bind mount. 예: `LAB10` 은 `/home/tako10/share/user-share/` 사용.
-- FARM에서는 NAS root_squash 때문에 컨테이너 root가 신규 홈 디렉토리를 만들 수 없다. create 스크립트가 컨테이너 실행 전에 NAS에 raw Ansible SSH로 접속해 `FARM_NAS_USER_SHARE_ROOT/<username>` 을 UID/GID 소유로 미리 생성한다. LAB은 이 단계가 아직 적용되지 않는다.
+- create 스크립트는 LAB에서 `LAB_HOST_USER_SHARE_ROOT_TEMPLATE` 를 컨테이너 `/home/` 에 bind mount. 기본값 예: `LAB10` 은 `/home/tako10/share/user-share/` 사용.
+- LAB storage 또는 FARM NAS에 root_squash가 있으면 컨테이너 root가 신규 홈 디렉토리를 만들 수 없다. create 스크립트가 컨테이너 실행 전에 LAB storage에는 `LAB_STORAGE_USER_SHARE_ROOT/<username>`, FARM NAS에는 `FARM_NAS_USER_SHARE_ROOT/<username>` 을 raw Ansible SSH로 미리 생성하고 UID/GID 소유권을 맞춘다.
+- LAB storage SSH 계정은 `sudo -n mkdir/chown/chmod` 를 실행할 수 있어야 한다. 예:
+
+```sudoers
+jy ALL=(root) NOPASSWD: /usr/bin/mkdir -p /294t/dcloud/share/user-share/*, /usr/bin/chown [0-9]*\:[0-9]* /294t/dcloud/share/user-share/*, /usr/bin/chmod 750 /294t/dcloud/share/user-share/*
+```
+
 - FARM NAS SSH 계정은 `sudo -n mkdir/chown/chmod` 를 실행할 수 있어야 한다. 예:
 
 ```sudoers
