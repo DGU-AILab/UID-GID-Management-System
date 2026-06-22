@@ -137,7 +137,7 @@ bash script/manage_group.sh delete --group project_a --force
 - `remove-user`: supplemental membership만 제거한다. primary group은 먼저 다른 group으로 바꿔야 제거할 수 있다.
 - `delete`: primary user가 없는 group만 삭제한다. supplemental membership이 남아 있으면 `--force`가 필요하다.
 
-사용자는 컨테이너 안에서 `decs-share ~/sharing_dir project_a`를 실행해 자기 home 내부 디렉토리를 직접 공유한다. Kerberos NFS에서는 target host의 NFSv4 idmapper가 group owner를 `FARM\project_a` 형식으로 해석해야 하므로 create script가 host local shadow group을 자동 준비한다.
+사용자는 컨테이너 안에서 `group-dir-share ~/sharing_dir project_a`를 실행해 자기 home 내부 디렉토리를 직접 공유한다. Kerberos NFS에서는 target host의 NFSv4 idmapper가 group owner를 `FARM\project_a` 형식으로 해석해야 하므로 create script가 host local shadow group을 자동 준비한다.
 
 ### 2. 컨테이너 삭제
 
@@ -611,7 +611,7 @@ DECS_NAS_PROVISIONERS ALL=(root) NOPASSWD: /usr/bin/mkdir -p /volume1/share/user
   - 재현 절차와 rollback은 `docs/kerberized-nfs-poc/README.md` 참고.
   - `--enable-kerberos true`는 FARM 전용 opt-in이다. 현재 keytab PoC는 target host가 `FARM_KERBEROS_AD_DC_HOST`와 같아야 한다.
   - 신규 AD user는 principal/keytab/RFC2307 attrs와 `msSFU30Name/msSFU30NisDomain`을 자동 생성한다. `msSFU30*`가 없으면 Synology NFS server가 신규 Kerberos identity에 write 권한을 주지 않는 케이스가 확인됐다. create script는 실제 NFS write check를 통과할 때만 컨테이너/DB 생성을 진행한다.
-  - Kerberos 모드에서 `--group groupA`처럼 username과 다른 group을 지정하면 create script가 AD group `groupA`의 `gidNumber/msSFU30*`를 보장하고 사용자를 member로 추가한다. 컨테이너 내부 group GID는 Synology가 보는 NAS AD-mapped GID로 설정하고, target host에는 `FARM\groupA` shadow group/user entry를 만들어 NFSv4 `chgrp`가 동작하게 한다. 사용자는 컨테이너 안에서 `decs-share ~/sharing_dir groupA`로 자기 홈 안의 원하는 디렉토리를 직접 공유할 수 있다.
+  - Kerberos 모드에서 `--group groupA`처럼 username과 다른 group을 지정하면 create script가 AD group `groupA`의 `gidNumber/msSFU30*`를 보장하고 사용자를 member로 추가한다. 컨테이너 내부 group GID는 Synology가 보는 NAS AD-mapped GID로 설정하고, target host에는 `FARM\groupA` shadow group/user entry를 만들어 NFSv4 `chgrp`가 동작하게 한다. 사용자는 컨테이너 안에서 `group-dir-share ~/sharing_dir groupA`로 자기 홈 안의 원하는 디렉토리를 직접 공유할 수 있다.
   - Kerberos 모드의 NAS home owner는 컨테이너 UID가 아니라 NAS winbind가 AD principal에 부여한 UID/GID다. Synology에서 `wbinfo -i FARM\\<username>`으로 조회한다.
 
 - Docker 이미지는 `dguailab/<image>:<version>` 형식으로 pull/inspect.

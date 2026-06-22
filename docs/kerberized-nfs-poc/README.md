@@ -172,7 +172,7 @@ decs-krb-refresh@<username>.timer
 
 - 컨테이너 사용자가 root/sudo 권한을 가지면 `setuid`로 다른 UID를 가장할 수 있고, host `rpc.gssd`가 그 UID의 host ccache를 찾아 다른 사용자의 Kerberos NFS home에 접근할 수 있다.
 - 따라서 Kerberos 모드 이미지는 `DECS_USER_SUDO_MODE=restricted`를 기본으로 사용한다. package install용 sudo는 허용하지만 `sudo -u`, `su`, `setpriv`, `runuser`, `chown/chgrp/chmod`, mount namespace 관련 명령, root shell, interpreter one-liner, 보호 경로 overwrite는 sudoers deny list로 막는다. 더 강하게 막아야 하는 경우에는 `DECS_USER_SUDO_MODE=disabled`를 명시한다.
-- 2026-06-21 restricted sudo 테스트에서 `sudo true`, `sudo apt-get --version`은 허용되고 `sudo -u nobody`, `sudo --user nobody`, `sudo su`, `sudo setpriv`, `sudo chmod`, `sudo bash`, `sudo python3 -c`는 실패했다. `decs-share`는 사용자 권한으로 `chmod 2770` 공유 디렉토리를 만들고, `sudo chgrp`는 실패했다.
+- 2026-06-21 restricted sudo 테스트에서 `sudo true`, `sudo apt-get --version`은 허용되고 `sudo -u nobody`, `sudo --user nobody`, `sudo su`, `sudo setpriv`, `sudo chmod`, `sudo bash`, `sudo python3 -c`는 실패했다. `group-dir-share`는 사용자 권한으로 `chmod 2770` 공유 디렉토리를 만들고, `sudo chgrp`는 실패했다.
 - local Ubuntu group만으로 Kerberos NFS group sharing을 기대하면 안 된다. `chmod 770`은 NAS에서 `FARM\Domain Users` group write가 되어 도메인 전체 write로 열릴 수 있다. Kerberos NFS group sharing은 AD group이 필요하다.
 
 사용자 self-service group sharing:
@@ -187,7 +187,7 @@ decs-krb-refresh@<username>.timer
   -> DB supplemental membership + AD group member 추가
 
 사용자:
-  decs-share ~/sharing_dir groupA
+  group-dir-share ~/sharing_dir groupA
   -> 사용자 권한으로 mkdir, chgrp groupA, chmod 2770 수행
 ```
 
