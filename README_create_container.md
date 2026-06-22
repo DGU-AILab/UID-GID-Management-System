@@ -39,6 +39,58 @@ If storage SSH must go through a jump host, set:
 LAB_STORAGE_SSH_COMMON_ARGS="-o ProxyJump=jy@192.168.1.12:8082"
 ```
 
+## LAB Kerberos NFS PoC
+
+LAB Kerberos mode is separate from the normal LAB root_squash path above. The
+current PoC uses a dedicated storage export instead of the operational LAB
+share:
+
+```text
+storage path: /294t/share/test-krb/user-share
+LAB2 mount:   /mnt/decs-lab-test-krb/user-share
+realm:        LAB.DECS.INTERNAL
+NFS mode:     NFSv4.1 sec=krb5p root_squash
+```
+
+`script/create_container.sh --domain LAB --enable-kerberos true` performs the
+following before Docker/DB finalization:
+
+1. Creates or reuses the Unix user/group on LAB storage with the DB UID/GID.
+2. Creates or reuses the MIT Kerberos principal `<username>@LAB.DECS.INTERNAL`.
+3. Exports a user keytab on LAB storage, then installs a root-only copy on the
+   target LAB host.
+4. Installs the same host ticket refresh service used by FARM, writing the
+   ccache at `/run/user/<uid>/krb5cc`.
+5. Runs a real NFS write check through the LAB host mount before creating the
+   Docker container or DB rows.
+
+Related settings:
+
+```text
+LAB_KERBEROS_REALM=LAB.DECS.INTERNAL
+LAB_KERBEROS_STORAGE_USER_SHARE_ROOT=/294t/share/test-krb/user-share
+LAB_KERBEROS_MOUNT_USER_SHARE_ROOT=/mnt/decs-lab-test-krb/user-share
+LAB_KERBEROS_CCACHE_BASE=/run/user
+LAB_KERBEROS_KRB5_CONF=/etc/krb5.conf
+LAB_KERBEROS_KEYTAB_DIR=/etc/decs-krb/keytabs
+LAB_KERBEROS_STORAGE_KEYTAB_DIR=/root/decs-lab-test-krb/keytabs
+LAB_KERBEROS_REFRESH_ENV_DIR=/etc/decs-krb/refresh.d
+```
+
+For `group-dir-share` to work cleanly over LAB NFSv4.1, both LAB storage and
+the LAB Docker host must use the same NFSv4 idmap domain:
+
+```ini
+[General]
+Domain = lab.decs.internal
+```
+
+Without this, host-managed Kerberos tickets can still read/write the user home,
+but NFSv4 owner/group names may appear as `nobody`/`nogroup`, and user-level
+`chgrp` can fail with `Invalid argument`. Because this is a global NFSv4 idmap
+setting on the storage server, it should be changed only after checking the
+impact on existing LAB NFS clients.
+
 ## FARM Kerberos NFS Cache Refresh
 
 FARM Kerberos mode is not only a Docker container creation flow. When a new

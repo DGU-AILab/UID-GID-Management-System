@@ -350,12 +350,25 @@ lab_storage_user_home_dir() {
   printf '%s/%s\n' "$share_root" "$username"
 }
 
+lab_kerberos_storage_user_home_dir() {
+  local username="$1"
+  local share_root="${LAB_KERBEROS_STORAGE_USER_SHARE_ROOT:-/294t/share/test-krb/user-share}"
+  share_root="${share_root%/}"
+  printf '%s/%s\n' "$share_root" "$username"
+}
+
 lab_host_user_share_root() {
   local server_number="$1"
   local share_root_template="${LAB_HOST_USER_SHARE_ROOT_TEMPLATE:-/home/tako{server_number}/share/user-share}"
   share_root_template="${share_root_template//\{server_number\}/$server_number}"
   share_root_template="${share_root_template%/}"
   printf '%s\n' "$share_root_template"
+}
+
+lab_kerberos_mount_user_share_root() {
+  local share_root="${LAB_KERBEROS_MOUNT_USER_SHARE_ROOT:-/mnt/decs-lab-test-krb/user-share}"
+  share_root="${share_root%/}"
+  printf '%s\n' "$share_root"
 }
 
 farm_nas_user_home_dir() {
@@ -390,8 +403,24 @@ farm_kerberos_ccache_file() {
   printf '%s/krb5cc\n' "$(farm_kerberos_ccache_dir "$uid")"
 }
 
+lab_kerberos_ccache_dir() {
+  local uid="$1"
+  local ccache_base="${LAB_KERBEROS_CCACHE_BASE:-/run/user}"
+  ccache_base="${ccache_base%/}"
+  printf '%s/%s\n' "$ccache_base" "$uid"
+}
+
+lab_kerberos_ccache_file() {
+  local uid="$1"
+  printf '%s/krb5cc\n' "$(lab_kerberos_ccache_dir "$uid")"
+}
+
 farm_kerberos_realm() {
   printf '%s\n' "${FARM_KERBEROS_REALM:-FARM.DECS.INTERNAL}"
+}
+
+lab_kerberos_realm() {
+  printf '%s\n' "${LAB_KERBEROS_REALM:-LAB.DECS.INTERNAL}"
 }
 
 farm_kerberos_ad_dc_hosts() {
@@ -452,8 +481,19 @@ farm_kerberos_principal() {
   printf '%s@%s\n' "$username" "$(farm_kerberos_realm)"
 }
 
+lab_kerberos_principal() {
+  local username="$1"
+  printf '%s@%s\n' "$username" "$(lab_kerberos_realm)"
+}
+
 farm_kerberos_keytab_dir() {
   local keytab_dir="${FARM_KERBEROS_KEYTAB_DIR:-/etc/decs-krb/keytabs}"
+  keytab_dir="${keytab_dir%/}"
+  printf '%s\n' "$keytab_dir"
+}
+
+lab_kerberos_keytab_dir() {
+  local keytab_dir="${LAB_KERBEROS_KEYTAB_DIR:-/etc/decs-krb/keytabs}"
   keytab_dir="${keytab_dir%/}"
   printf '%s\n' "$keytab_dir"
 }
@@ -463,8 +503,30 @@ farm_kerberos_keytab_file() {
   printf '%s/%s.keytab\n' "$(farm_kerberos_keytab_dir)" "$username"
 }
 
+lab_kerberos_keytab_file() {
+  local username="$1"
+  printf '%s/%s.keytab\n' "$(lab_kerberos_keytab_dir)" "$username"
+}
+
+lab_kerberos_storage_keytab_dir() {
+  local keytab_dir="${LAB_KERBEROS_STORAGE_KEYTAB_DIR:-/root/decs-lab-test-krb/keytabs}"
+  keytab_dir="${keytab_dir%/}"
+  printf '%s\n' "$keytab_dir"
+}
+
+lab_kerberos_storage_keytab_file() {
+  local username="$1"
+  printf '%s/%s.keytab\n' "$(lab_kerberos_storage_keytab_dir)" "$username"
+}
+
 farm_kerberos_refresh_env_dir() {
   local env_dir="${FARM_KERBEROS_REFRESH_ENV_DIR:-/etc/decs-krb/refresh.d}"
+  env_dir="${env_dir%/}"
+  printf '%s\n' "$env_dir"
+}
+
+lab_kerberos_refresh_env_dir() {
+  local env_dir="${LAB_KERBEROS_REFRESH_ENV_DIR:-/etc/decs-krb/refresh.d}"
   env_dir="${env_dir%/}"
   printf '%s\n' "$env_dir"
 }
@@ -472,6 +534,11 @@ farm_kerberos_refresh_env_dir() {
 farm_kerberos_refresh_env_file() {
   local username="$1"
   printf '%s/%s.env\n' "$(farm_kerberos_refresh_env_dir)" "$username"
+}
+
+lab_kerberos_refresh_env_file() {
+  local username="$1"
+  printf '%s/%s.env\n' "$(lab_kerberos_refresh_env_dir)" "$username"
 }
 
 build_remote_storage_prepare_home_command() {
@@ -504,6 +571,171 @@ build_farm_nas_prepare_home_command() {
   local uid="$2"
   local gid="$3"
   build_remote_storage_prepare_home_command "$home_dir" "$uid" "$gid" "${FARM_NAS_SUDO-sudo -n}"
+}
+
+build_lab_kerberos_storage_keytab_command() {
+  local username="$1"
+  local principal="$2"
+  local storage_keytab_file="$3"
+  local rotate_keytab="$4"
+  local uid="$5"
+  local gid="$6"
+  local sudo_prefix="${LAB_STORAGE_SUDO-sudo -n}"
+  local home_dir keytab_dir
+
+  home_dir="$(lab_kerberos_storage_user_home_dir "$username")"
+  keytab_dir="$(dirname "$storage_keytab_file")"
+
+  cat <<EOF
+set -eu
+username=$(shell_quote "$username")
+principal=$(shell_quote "$principal")
+keytab_file=$(shell_quote "$storage_keytab_file")
+keytab_dir=$(shell_quote "$keytab_dir")
+home_dir=$(shell_quote "$home_dir")
+rotate_keytab=$(shell_quote "$rotate_keytab")
+uid=$(shell_quote "$uid")
+gid=$(shell_quote "$gid")
+
+if getent group "\$gid" >/dev/null 2>&1; then
+  :
+elif getent group "\$username" >/dev/null 2>&1; then
+  current_gid="\$(getent group "\$username" | awk -F: 'NR==1 { print \$3 }')"
+  if [ "\$current_gid" != "\$gid" ]; then
+    echo "Storage group \$username exists with GID \$current_gid, expected \$gid" >&2
+    exit 1
+  fi
+else
+  ${sudo_prefix} groupadd -g "\$gid" "\$username"
+fi
+
+if getent passwd "\$uid" >/dev/null 2>&1; then
+  current_user="\$(getent passwd "\$uid" | awk -F: 'NR==1 { print \$1 }')"
+  if [ "\$current_user" != "\$username" ]; then
+    echo "Storage UID \$uid already belongs to \$current_user, expected \$username" >&2
+    exit 1
+  fi
+elif getent passwd "\$username" >/dev/null 2>&1; then
+  current_uid="\$(getent passwd "\$username" | awk -F: 'NR==1 { print \$3 }')"
+  if [ "\$current_uid" != "\$uid" ]; then
+    echo "Storage user \$username exists with UID \$current_uid, expected \$uid" >&2
+    exit 1
+  fi
+else
+  ${sudo_prefix} useradd -u "\$uid" -g "\$gid" -M -N -s /sbin/nologin "\$username"
+fi
+
+${sudo_prefix} mkdir -p "\$home_dir"
+${sudo_prefix} chown "\$uid:\$gid" "\$home_dir"
+${sudo_prefix} chmod 750 "\$home_dir"
+
+${sudo_prefix} install -d -o root -g root -m 0700 "\$keytab_dir"
+if ! ${sudo_prefix} kadmin.local -q "getprinc \$principal" 2>/dev/null | grep -q '^Principal:'; then
+  ${sudo_prefix} kadmin.local -q "addprinc -randkey \$principal" >/dev/null
+elif [ "\$rotate_keytab" = "true" ]; then
+  ${sudo_prefix} kadmin.local -q "cpw -randkey \$principal" >/dev/null
+fi
+
+keytab_needs_refresh=false
+if [ ! -f "\$keytab_file" ] || [ "\$rotate_keytab" = "true" ]; then
+  keytab_needs_refresh=true
+elif ! ${sudo_prefix} klist -kte "\$keytab_file" >/dev/null 2>&1; then
+  keytab_needs_refresh=true
+fi
+
+if [ "\$keytab_needs_refresh" = "true" ]; then
+  tmp_keytab="\$(mktemp)"
+  rm -f "\$tmp_keytab"
+  ${sudo_prefix} kadmin.local -q "ktadd -k \$tmp_keytab \$principal" >/dev/null
+  ${sudo_prefix} chown root:root "\$tmp_keytab"
+  ${sudo_prefix} chmod 0400 "\$tmp_keytab"
+  ${sudo_prefix} mv "\$tmp_keytab" "\$keytab_file"
+fi
+
+${sudo_prefix} chown root:root "\$keytab_file"
+${sudo_prefix} chmod 0400 "\$keytab_file"
+${sudo_prefix} klist -kte "\$keytab_file" >/dev/null
+echo "__DECS_KEYTAB_B64_BEGIN__"
+${sudo_prefix} base64 -w0 "\$keytab_file"
+echo
+echo "__DECS_KEYTAB_B64_END__"
+EOF
+}
+
+build_remote_keytab_install_command() {
+  local keytab_file="$1"
+  local keytab_b64="$2"
+  local sudo_prefix="${KERBEROS_REMOTE_SUDO:-sudo -n}"
+  local keytab_dir
+
+  keytab_dir="$(dirname "$keytab_file")"
+
+  cat <<EOF
+set -eu
+keytab_file=$(shell_quote "$keytab_file")
+keytab_dir=$(shell_quote "$keytab_dir")
+${sudo_prefix} install -d -o root -g root -m 0700 "\$keytab_dir"
+tmp_keytab="\$(mktemp)"
+base64 -d > "\$tmp_keytab" <<'DECS_KEYTAB_B64'
+${keytab_b64}
+DECS_KEYTAB_B64
+${sudo_prefix} chown root:root "\$tmp_keytab"
+${sudo_prefix} chmod 0400 "\$tmp_keytab"
+${sudo_prefix} mv "\$tmp_keytab" "\$keytab_file"
+${sudo_prefix} klist -kte "\$keytab_file" >/dev/null
+EOF
+}
+
+build_kerberos_local_host_identity_command() {
+  local username="$1"
+  local uid="$2"
+  local groupname="$3"
+  local gid="$4"
+  local sudo_prefix="${KERBEROS_REMOTE_SUDO:-sudo -n}"
+
+  cat <<EOF
+set -eu
+username=$(shell_quote "$username")
+uid=$(shell_quote "$uid")
+groupname=$(shell_quote "$groupname")
+gid=$(shell_quote "$gid")
+
+if getent group "\$gid" >/dev/null 2>&1; then
+  :
+elif getent group "\$groupname" >/dev/null 2>&1; then
+  current_gid="\$(getent group "\$groupname" | awk -F: 'NR==1 { print \$3 }')"
+  if [ "\$current_gid" != "\$gid" ]; then
+    echo "Host group \$groupname exists with GID \$current_gid, expected \$gid" >&2
+    exit 1
+  fi
+else
+  ${sudo_prefix} groupadd -g "\$gid" "\$groupname"
+fi
+
+if getent passwd "\$uid" >/dev/null 2>&1; then
+  current_user="\$(getent passwd "\$uid" | awk -F: 'NR==1 { print \$1 }')"
+  if [ "\$current_user" != "\$username" ]; then
+    echo "Host UID \$uid already belongs to \$current_user, expected \$username" >&2
+    exit 1
+  fi
+  ${sudo_prefix} usermod -g "\$gid" "\$username" >/dev/null 2>&1 || true
+elif getent passwd "\$username" >/dev/null 2>&1; then
+  current_uid="\$(getent passwd "\$username" | awk -F: 'NR==1 { print \$3 }')"
+  if [ "\$current_uid" != "\$uid" ]; then
+    echo "Host user \$username exists with UID \$current_uid, expected \$uid" >&2
+    exit 1
+  fi
+  ${sudo_prefix} usermod -g "\$gid" "\$username" >/dev/null 2>&1 || true
+else
+  ${sudo_prefix} useradd -u "\$uid" -g "\$gid" -M -N -s /usr/sbin/nologin "\$username"
+fi
+
+if command -v nfsidmap >/dev/null 2>&1; then
+  ${sudo_prefix} nfsidmap -c >/dev/null 2>&1 || true
+fi
+
+echo "kerberos_local_host_identity_ready user=\$username uid=\$uid group=\$groupname gid=\$gid"
+EOF
 }
 
 build_farm_kerberos_keytab_command() {
@@ -1317,9 +1549,19 @@ prepare_remote_kerberos_ccache_dir() {
   local host_alias="$1"
   local uid="$2"
   local gid="$3"
-  local ccache_dir raw_command
+  local ccache_dir
 
   ccache_dir="$(farm_kerberos_ccache_dir "$uid")"
+  prepare_remote_kerberos_ccache_dir_at "$host_alias" "$ccache_dir" "$uid" "$gid"
+}
+
+prepare_remote_kerberos_ccache_dir_at() {
+  local host_alias="$1"
+  local ccache_dir="$2"
+  local uid="$3"
+  local gid="$4"
+  local raw_command
+
   raw_command="$(build_kerberos_ccache_dir_command "$ccache_dir" "$uid" "$gid")"
   run_remote_shell "$host_alias" "$raw_command"
 }
@@ -1346,6 +1588,18 @@ ensure_remote_kerberos_nfs_group() {
   run_remote_shell "$host_alias" "$raw_command"
 }
 
+ensure_remote_kerberos_local_identity() {
+  local host_alias="$1"
+  local username="$2"
+  local uid="$3"
+  local groupname="$4"
+  local gid="$5"
+  local raw_command
+
+  raw_command="$(build_kerberos_local_host_identity_command "$username" "$uid" "$groupname" "$gid")"
+  run_remote_shell "$host_alias" "$raw_command"
+}
+
 ensure_farm_kerberos_keytab() {
   local host_alias="$1"
   local username="$2"
@@ -1358,6 +1612,44 @@ ensure_farm_kerberos_keytab() {
   local raw_command
 
   raw_command="$(build_farm_kerberos_keytab_command "$username" "$principal" "$keytab_file" "$rotate_keytab" "$uid" "$gid" "$groupname")"
+  run_remote_shell "$host_alias" "$raw_command"
+}
+
+ensure_lab_kerberos_keytab() {
+  local host_alias="$1"
+  local username="$2"
+  local principal="$3"
+  local keytab_file="$4"
+  local rotate_keytab="$5"
+  local uid="$6"
+  local gid="$7"
+  local storage_host="${LAB_STORAGE_HOST:-192.168.1.20}"
+  local storage_port="${LAB_STORAGE_PORT:-6953}"
+  local storage_user="${LAB_STORAGE_USER:-jy}"
+  local storage_key="${LAB_STORAGE_SSH_KEY:-}"
+  local storage_ssh_common_args="${LAB_STORAGE_SSH_COMMON_ARGS:-}"
+  local storage_keytab_file output keytab_b64 raw_command
+
+  storage_keytab_file="$(lab_kerberos_storage_keytab_file "$username")"
+  raw_command="$(build_lab_kerberos_storage_keytab_command "$username" "$principal" "$storage_keytab_file" "$rotate_keytab" "$uid" "$gid")"
+  output="$(run_remote_raw_capture "$storage_host" "$storage_port" "$storage_user" "$storage_key" "$raw_command" "$storage_ssh_common_args")" || return 1
+  keytab_b64="$(printf '%s\n' "$output" | awk '
+    /__DECS_KEYTAB_B64_BEGIN__/ { capture=1; next }
+    /__DECS_KEYTAB_B64_END__/ { capture=0 }
+    capture {
+      line=$0
+      gsub(/\r/, "", line)
+      if (line ~ /^[A-Za-z0-9+\/=]+$/) printf "%s", line
+    }
+  ')"
+
+  if [ -z "$keytab_b64" ]; then
+    echo "Error: could not extract LAB Kerberos keytab payload for ${username}" >&2
+    echo "$output" >&2
+    return 1
+  fi
+
+  raw_command="$(build_remote_keytab_install_command "$keytab_file" "$keytab_b64")"
   run_remote_shell "$host_alias" "$raw_command"
 }
 

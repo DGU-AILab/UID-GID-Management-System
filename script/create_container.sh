@@ -57,7 +57,7 @@ function show_help {
   echo "      --enable-vnc true|false     Enable noVNC GUI access and map container port 6080"
   echo "      --enable_vnc true|false     Alias for --enable-vnc"
   echo "      --enable-kerberos true|false"
-  echo "                                    Prepare FARM Kerberos NFS home and ccache mount"
+  echo "                                    Prepare Kerberos NFS home and ccache mount"
   echo "      --rotate-kerberos-keytab true|false"
   echo "                                    Reset AD password and export a fresh host keytab"
   echo "  -c, --created-by CREATOR        Username of server manager"
@@ -249,8 +249,8 @@ fi
 
 domain_name="$(normalize_domain_name "$domain_name")" || exit 1
 server_number="$(validate_server_number "$server_number")" || exit 1
-if [ "$enable_kerberos" = "true" ] && [ "$domain_name" != "FARM" ]; then
-  echo "Error: --enable-kerberos is currently supported only for FARM."
+if [ "$enable_kerberos" = "true" ] && [ "$domain_name" != "FARM" ] && [ "$domain_name" != "LAB" ]; then
+  echo "Error: --enable-kerberos is currently supported only for LAB or FARM."
   exit 1
 fi
 server_id="$(compose_server_id "$domain_name" "$server_number")"
@@ -383,10 +383,13 @@ port_base=9000
 start_port=$((port_base + 100 * (server_number - 1)))
 end_port=$((port_base + 100 * server_number - 1))
 
-used_ports=$(mysql_exec -N -e "SELECT port_number FROM used_ports;")
+db_used_ports=$(mysql_exec -N -e "SELECT port_number FROM used_ports;")
+docker_used_ports="$(run_remote_shell_capture "$target_host" "docker ps --no-trunc | grep -oE '0\\.0\\.0\\.0:[0-9]+->|\\[::\\]:[0-9]+->' | sed -E 's/.*:([0-9]+)->/\\1/' | sort -n -u" 2>/dev/null | awk '/^[0-9]+$/ { print }' || true)"
+used_ports="${db_used_ports}
+${docker_used_ports}"
 available_ports=()
 for ((port = start_port; port <= end_port; port++)); do
-  if ! echo "$used_ports" | grep -q "$port"; then
+  if ! echo "$used_ports" | grep -qx "$port"; then
     available_ports+=($port)
   fi
 done
@@ -474,7 +477,11 @@ fi
 lab_storage_home_dir=""
 farm_nas_home_dir=""
 if [ "$domain_name" = "LAB" ]; then
-  lab_storage_home_dir="$(lab_storage_user_home_dir "$username")"
+  if [ "$enable_kerberos" = "true" ]; then
+    lab_storage_home_dir="$(lab_kerberos_storage_user_home_dir "$username")"
+  else
+    lab_storage_home_dir="$(lab_storage_user_home_dir "$username")"
+  fi
 elif [ "$domain_name" = "FARM" ]; then
   if [ "$enable_kerberos" = "true" ]; then
     farm_nas_home_dir="$(farm_kerberos_nas_user_home_dir "$username")"
@@ -484,7 +491,11 @@ elif [ "$domain_name" = "FARM" ]; then
 fi
 
 if [ "$domain_name" = "LAB" ]; then
-  home_mount_source="$(lab_host_user_share_root "$server_number")/"
+  if [ "$enable_kerberos" = "true" ]; then
+    home_mount_source="$(lab_kerberos_mount_user_share_root)/"
+  else
+    home_mount_source="$(lab_host_user_share_root "$server_number")/"
+  fi
 else
   home_mount_source="/home/tako${server_number}/share/user-share/"
 fi
@@ -500,19 +511,34 @@ kerberos_docker_params=""
 container_gid="$available_gid"
 
 if [ "$enable_kerberos" = "true" ]; then
-  if ! farm_kerberos_is_ad_dc_host "$target_host"; then
-    echo "Error: --enable-kerberos keytab mode requires target host (${target_host}) to be one of FARM_KERBEROS_AD_DC_HOSTS (${kerberos_ad_dc_hosts})."
-    echo "Hint: add ${target_host} to FARM_KERBEROS_AD_DC_HOSTS or create the Kerberos container on one of those DC hosts."
-    exit 1
+  if [ "$domain_name" = "FARM" ]; then
+    if ! farm_kerberos_is_ad_dc_host "$target_host"; then
+      echo "Error: --enable-kerberos keytab mode requires target host (${target_host}) to be one of FARM_KERBEROS_AD_DC_HOSTS (${kerberos_ad_dc_hosts})."
+      echo "Hint: add ${target_host} to FARM_KERBEROS_AD_DC_HOSTS or create the Kerberos container on one of those DC hosts."
+      exit 1
+    fi
+    kerberos_ad_dc_host="$target_host"
+    home_mount_source="$(farm_kerberos_mount_user_share_root)/"
+    kerberos_ccache_dir="$(farm_kerberos_ccache_dir "$available_uid")"
+    kerberos_ccache_file="$(farm_kerberos_ccache_file "$available_uid")"
+    kerberos_principal="$(farm_kerberos_principal "$username")"
+    kerberos_keytab_file="$(farm_kerberos_keytab_file "$username")"
+    kerberos_refresh_env_file="$(farm_kerberos_refresh_env_file "$username")"
+    kerberos_krb5_conf="${FARM_KERBEROS_KRB5_CONF:-/etc/krb5.conf}"
+    kerberos_realm="$(farm_kerberos_realm)"
+  else
+    kerberos_ad_dc_hosts=""
+    kerberos_ad_dc_host=""
+    home_mount_source="$(lab_kerberos_mount_user_share_root)/"
+    kerberos_ccache_dir="$(lab_kerberos_ccache_dir "$available_uid")"
+    kerberos_ccache_file="$(lab_kerberos_ccache_file "$available_uid")"
+    kerberos_principal="$(lab_kerberos_principal "$username")"
+    kerberos_keytab_file="$(lab_kerberos_keytab_file "$username")"
+    kerberos_refresh_env_file="$(lab_kerberos_refresh_env_file "$username")"
+    kerberos_krb5_conf="${LAB_KERBEROS_KRB5_CONF:-/etc/krb5.conf}"
+    kerberos_realm="$(lab_kerberos_realm)"
   fi
-  kerberos_ad_dc_host="$target_host"
-  home_mount_source="$(farm_kerberos_mount_user_share_root)/"
-  kerberos_ccache_dir="$(farm_kerberos_ccache_dir "$available_uid")"
-  kerberos_ccache_file="$(farm_kerberos_ccache_file "$available_uid")"
-  kerberos_principal="$(farm_kerberos_principal "$username")"
-  kerberos_keytab_file="$(farm_kerberos_keytab_file "$username")"
-  kerberos_refresh_env_file="$(farm_kerberos_refresh_env_file "$username")"
-  kerberos_docker_params=" --mount type=bind,source='${kerberos_ccache_dir}',target='${kerberos_ccache_dir}' --mount type=bind,source='${kerberos_krb5_conf}',target=/etc/krb5.conf,readonly -e KRB5CCNAME='FILE:${kerberos_ccache_file}' -e DECS_KERBEROS_ENABLED='true' -e DECS_KERBEROS_HOST_KEYTAB='true' -e DECS_USER_SUDO_MODE='restricted' -e DECS_KRB5_PRINCIPAL='${kerberos_principal}' -e KRB5_REALM='$(farm_kerberos_realm)'"
+  kerberos_docker_params=" --mount type=bind,source='${kerberos_ccache_dir}',target='${kerberos_ccache_dir}' --mount type=bind,source='${kerberos_krb5_conf}',target=/etc/krb5.conf,readonly -e KRB5CCNAME='FILE:${kerberos_ccache_file}' -e DECS_KERBEROS_ENABLED='true' -e DECS_KERBEROS_HOST_KEYTAB='true' -e DECS_USER_SUDO_MODE='restricted' -e DECS_KRB5_PRINCIPAL='${kerberos_principal}' -e KRB5_REALM='${kerberos_realm}'"
 fi
 
 function cleanup_and_exit {
@@ -596,17 +622,25 @@ if [ "$dry_run" = "true" ]; then
   if [ "$enable_kerberos" = "true" ]; then
     echo "[DRY-RUN] Kerberos NFS will be enabled"
     echo "[DRY-RUN] Kerberos home mount source: ${home_mount_source}"
-    echo "[DRY-RUN] Kerberos NAS home: ${farm_nas_home_dir} (owner resolved from NAS AD mapping at apply time)"
+    if [ "$domain_name" = "FARM" ]; then
+      echo "[DRY-RUN] Kerberos NAS home: ${farm_nas_home_dir} (owner resolved from NAS AD mapping at apply time)"
+    else
+      echo "[DRY-RUN] Kerberos LAB storage home: ${lab_storage_home_dir} (${available_uid}:${available_gid})"
+    fi
     echo "[DRY-RUN] Kerberos ccache dir: ${kerberos_ccache_dir}"
     echo "[DRY-RUN] Kerberos ccache file: ${kerberos_ccache_file}"
     echo "[DRY-RUN] Kerberos principal: ${kerberos_principal}"
     echo "[DRY-RUN] Kerberos host keytab: ${kerberos_keytab_file} (root:root 0400 on ${target_host})"
-    echo "[DRY-RUN] Kerberos AD DC hosts: ${kerberos_ad_dc_hosts}"
-    echo "[DRY-RUN] Kerberos AD operations host: ${kerberos_ad_dc_host}"
+    if [ "$domain_name" = "FARM" ]; then
+      echo "[DRY-RUN] Kerberos AD DC hosts: ${kerberos_ad_dc_hosts}"
+      echo "[DRY-RUN] Kerberos AD operations host: ${kerberos_ad_dc_host}"
+    else
+      echo "[DRY-RUN] Kerberos LAB storage KDC: ${LAB_STORAGE_HOST:-192.168.1.20}:${LAB_STORAGE_PORT:-6953}"
+    fi
     echo "[DRY-RUN] Kerberos refresh env: ${kerberos_refresh_env_file} (root:root 0600 on ${target_host})"
     echo "[DRY-RUN] Kerberos keytab rotation requested: ${rotate_kerberos_keytab}"
     echo "[DRY-RUN] Kerberos krb5.conf bind source: ${kerberos_krb5_conf}"
-    if [ "$groupname" != "$username" ]; then
+    if [ "$domain_name" = "FARM" ] && [ "$groupname" != "$username" ]; then
       echo "[DRY-RUN] Kerberos AD group will be ensured: ${groupname} (gidNumber=${available_gid})"
       echo "[DRY-RUN] Kerberos AD membership will include: ${username} -> ${groupname}"
       echo "[DRY-RUN] Kerberos container primary GID will be resolved from NAS AD mapping for: ${groupname}"
@@ -645,10 +679,33 @@ if ! run_remote_shell "$target_host" "docker image inspect dguailab/$container_i
   cleanup_and_exit "Failed to ensure Docker image on ${target_host}"
 fi
 
-if [ "$domain_name" = "LAB" ]; then
+if [ "$domain_name" = "LAB" ] && [ "$enable_kerberos" != "true" ]; then
   echo "Preparing LAB storage home ${lab_storage_home_dir} for ${username} (${available_uid}:${available_gid})..."
   if ! prepare_lab_storage_user_home "$username" "$available_uid" "$available_gid"; then
     cleanup_and_exit "Failed to prepare LAB storage home for ${username}"
+  fi
+fi
+
+if [ "$domain_name" = "LAB" ] && [ "$enable_kerberos" = "true" ]; then
+  echo "Ensuring LAB Kerberos principal, storage home, and host keytab for ${kerberos_principal}..."
+  if ! ensure_lab_kerberos_keytab "$target_host" "$username" "$kerberos_principal" "$kerberos_keytab_file" "$rotate_kerberos_keytab" "$available_uid" "$available_gid"; then
+    cleanup_and_exit "Failed to prepare LAB Kerberos keytab for ${username}"
+  fi
+  echo "Preparing LAB Kerberos host identity mapping for ${username}/${groupname} on ${target_host}..."
+  if ! ensure_remote_kerberos_local_identity "$target_host" "$username" "$available_uid" "$groupname" "$container_gid"; then
+    cleanup_and_exit "Failed to prepare LAB Kerberos host identity mapping for ${username}/${groupname}"
+  fi
+  echo "Preparing Kerberos credential cache directory ${kerberos_ccache_dir} on ${target_host}..."
+  if ! prepare_remote_kerberos_ccache_dir_at "$target_host" "$kerberos_ccache_dir" "$available_uid" "$container_gid"; then
+    cleanup_and_exit "Failed to prepare Kerberos credential cache directory for ${username}"
+  fi
+  echo "Installing Kerberos host refresh service for ${username} on ${target_host}..."
+  if ! install_farm_kerberos_host_refresh "$target_host" "$username" "$available_uid" "$container_gid" "$kerberos_principal" "$kerberos_keytab_file" "$kerberos_ccache_dir" "$kerberos_ccache_file" "$kerberos_refresh_env_file"; then
+    cleanup_and_exit "Failed to install Kerberos host refresh service for ${username}"
+  fi
+  echo "Verifying LAB Kerberos NFS access for ${username} on ${target_host}..."
+  if ! verify_remote_kerberos_nfs_home_access "$target_host" "$(lab_kerberos_mount_user_share_root)" "$username" "$available_uid" "$container_gid" "$kerberos_ccache_file"; then
+    cleanup_and_exit "Kerberos NFS access check failed for ${username} on LAB storage."
   fi
 fi
 
