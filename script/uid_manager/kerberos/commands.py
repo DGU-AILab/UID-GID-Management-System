@@ -37,8 +37,14 @@ def build_nas_lookup_identity_command(config: AppConfig, username: str) -> str:
     return "\n".join([
         "set -eu",
         "wbinfo_bin=/usr/local/packages/@appstore/SMBService/usr/bin/wbinfo",
-        f"entry=$(\"$wbinfo_bin\" -i {q(identity)})",
-        "printf '%s\\n' \"$entry\" | awk -F: '{ print $3 \" \" $4 }'",
+        f"identity={q(identity)}",
+        "if entry=$(\"$wbinfo_bin\" -i \"$identity\" 2>/dev/null); then",
+        "  printf '%s\\n' \"$entry\" | awk -F: '{ print $3 \" \" $4 }'",
+        "  exit 0",
+        "fi",
+        "uid=$(id -u \"$identity\")",
+        "gid=$(id -g \"$identity\")",
+        "printf '%s %s\\n' \"$uid\" \"$gid\"",
     ])
 
 

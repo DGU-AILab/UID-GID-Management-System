@@ -229,7 +229,9 @@ def test_apply_kerberos_alias_uses_db_uid_for_ad_host_and_container_identity():
 
     raw_commands = "\n".join(command for _, command in remote.raw_calls)
     shell_commands = "\n".join(command for _, command in remote.shell_calls)
-    assert "wbinfo_bin\" -i 'FARM\\farm_jy'" in raw_commands
+    assert "identity='FARM\\farm_jy'" in raw_commands
+    assert 'wbinfo_bin" -i "$identity"' in raw_commands
+    assert 'id -u "$identity"' in raw_commands
     assert "samba-tool user create \"$username\"" in shell_commands
     assert "principal=farm_jy@FARM.DECS.INTERNAL" in shell_commands
     assert "uid=1003" in shell_commands
