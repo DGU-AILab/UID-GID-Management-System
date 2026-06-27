@@ -508,8 +508,8 @@ class ContainerCreateService:
             f"{port_params} --runtime=nvidia --cap-add=SYS_ADMIN --ipc=host "
             f"--mount type=bind,source='{home_mount_source}',target=/home"
             f"{kerberos_params} --name '{container_name}' "
-            f"-e USER_ID='{request.username}' -e GID='{runtime_gid}' -e TARGET_GID='{runtime_gid}' "
-            f"-e USER_PW='{user_password}' -e USER_GROUP='{groupname}' -e UID='{uid}' -e TARGET_UID='{uid}'"
+            f"-e USER_ID='{request.username}' -e GID='{runtime_gid}' "
+            f"-e USER_PW='{user_password}' -e USER_GROUP='{groupname}' -e UID='{uid}'"
             f"{supplemental}{vnc_env} -e NVIDIA_DRIVER_CAPABILITIES='compute,utility,graphics,display' "
             f"dguailab/{request.image}:{request.version}"
         )

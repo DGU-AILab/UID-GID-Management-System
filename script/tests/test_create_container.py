@@ -207,8 +207,10 @@ def test_dry_run_kerberos_alias_separates_container_and_ad_identity():
     assert "ad_unix_gid: 1003" in rendered
     assert "DECS_KRB5_PRINCIPAL='farm_jy@FARM.DECS.INTERNAL'" in command
     assert "USER_ID='jy'" in command
-    assert "TARGET_UID='1003'" in command
-    assert "TARGET_GID='1003'" in command
+    assert "UID='1003'" in command
+    assert "GID='1003'" in command
+    assert "TARGET_UID" not in command
+    assert "TARGET_GID" not in command
     assert "KRB5CCNAME='FILE:/run/user/1003/krb5cc'" in command
 
 
@@ -234,7 +236,9 @@ def test_apply_kerberos_alias_uses_db_uid_for_ad_host_and_container_identity():
     assert "gid=1003" in shell_commands
     assert "setpriv --reuid=1003 --regid=1003" in shell_commands
     docker_runs = [command for _, command in remote.shell_calls if command.startswith("docker run")]
-    assert docker_runs and "TARGET_UID='1003'" in docker_runs[0] and "TARGET_GID='1003'" in docker_runs[0]
+    assert docker_runs and "UID='1003'" in docker_runs[0] and "GID='1003'" in docker_runs[0]
+    assert "TARGET_UID" not in docker_runs[0]
+    assert "TARGET_GID" not in docker_runs[0]
     identity = repo.kerberos_identities["jy"]
     assert identity.ad_username == "farm_jy"
     assert identity.ad_uid_number == 1003

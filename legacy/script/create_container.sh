@@ -656,7 +656,7 @@ if [ "$dry_run" = "true" ]; then
     fi
     if [ -n "$supplemental_group_specs" ]; then
       echo "[DRY-RUN] Kerberos supplemental groups from DB: ${supplemental_group_specs}"
-      echo "[DRY-RUN] Kerberos supplemental container GIDs will be resolved from NAS AD mapping at apply time"
+      echo "[DRY-RUN] Kerberos supplemental container GIDs will use DB/AD gidNumber values"
     fi
   fi
   if [ -n "$user_info" ]; then
@@ -743,11 +743,11 @@ if [ "$domain_name" = "FARM" ]; then
       cleanup_and_exit "Failed to sync FARM Kerberos AD changes from ${kerberos_ad_dc_host} to $(farm_kerberos_default_ad_dc_host)"
     fi
     if [ "$groupname" != "$username" ]; then
-      echo "Resolving FARM NAS AD-mapped group GID for ${groupname}..."
-      if ! container_gid="$(lookup_farm_nas_ad_group_gid_with_retry "$groupname")"; then
+      echo "Verifying FARM NAS can resolve AD group ${groupname}..."
+      if ! lookup_farm_nas_ad_group_gid_with_retry "$groupname" >/dev/null; then
         cleanup_and_exit "Failed to resolve FARM NAS AD group GID for ${groupname}. Create the AD group before enabling Kerberos sharing."
       fi
-      echo "Using Kerberos container GID ${container_gid} for ${groupname} (DB GID ${available_gid})"
+      echo "Using DB/AD GID ${container_gid} for Kerberos container group ${groupname}."
       echo "Preparing Kerberos NFS host identity mapping for ${username}/${groupname} on ${target_host}..."
       if ! ensure_remote_kerberos_nfs_identity "$target_host" "$username" "$available_uid" "$groupname" "$container_gid"; then
         cleanup_and_exit "Failed to prepare Kerberos NFS host identity mapping for ${username}/${groupname}"
@@ -757,8 +757,8 @@ if [ "$domain_name" = "FARM" ]; then
       supplemental_group_specs=""
       while IFS=$'\t' read -r supplemental_group_name supplemental_group_gid; do
         [ -n "$supplemental_group_name" ] || continue
-        echo "Resolving FARM NAS AD-mapped supplemental group GID for ${supplemental_group_name}..."
-        if ! supplemental_group_gid="$(lookup_farm_nas_ad_group_gid_with_retry "$supplemental_group_name")"; then
+        echo "Verifying FARM NAS can resolve supplemental AD group ${supplemental_group_name}..."
+        if ! lookup_farm_nas_ad_group_gid_with_retry "$supplemental_group_name" >/dev/null; then
           cleanup_and_exit "Failed to resolve FARM NAS AD supplemental group GID for ${supplemental_group_name}"
         fi
         echo "Preparing Kerberos NFS host group mapping for supplemental group ${supplemental_group_name} on ${target_host}..."
@@ -817,7 +817,7 @@ if [ "$enable_vnc" = "true" ]; then
   vnc_env_params=" -e ENABLE_VNC='true' -e VNC_PASSWORD='${vnc_password}'"
 fi
 
-remote_run_command="docker run -dit --init --gpus device=all --memory=192g --memory-swap=192g ${port_params} --runtime=nvidia --cap-add=SYS_ADMIN --ipc=host --mount type=bind,source='${home_mount_source}',target=/home/${kerberos_docker_params} --name '${container_name_param}' -e USER_ID='${username}' -e GID='${container_gid}' -e TARGET_GID='${container_gid}' -e USER_PW='${user_password}' -e USER_GROUP='${groupname}' -e UID='${available_uid}' -e TARGET_UID='${available_uid}'${supplemental_docker_params}${vnc_env_params} -e NVIDIA_DRIVER_CAPABILITIES='compute,utility,graphics,display' dguailab/${container_image}:${container_version}"
+remote_run_command="docker run -dit --init --gpus device=all --memory=192g --memory-swap=192g ${port_params} --runtime=nvidia --cap-add=SYS_ADMIN --ipc=host --mount type=bind,source='${home_mount_source}',target=/home/${kerberos_docker_params} --name '${container_name_param}' -e USER_ID='${username}' -e GID='${container_gid}' -e USER_PW='${user_password}' -e USER_GROUP='${groupname}' -e UID='${available_uid}'${supplemental_docker_params}${vnc_env_params} -e NVIDIA_DRIVER_CAPABILITIES='compute,utility,graphics,display' dguailab/${container_image}:${container_version}"
 container_output=$(run_remote_shell_capture "$target_host" "$remote_run_command") || cleanup_and_exit "Failed to create Docker container on ${target_host}"
 container_id=$(printf '%s\n' "$container_output" | tail -n1 | tr -d '\r')
 
