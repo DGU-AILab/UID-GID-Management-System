@@ -1,0 +1,15 @@
+---
+- name: Prepare a storage-backed home directory
+  hosts: "{{ storage_host }}"
+  gather_facts: false
+  vars:
+    ansible_port: "{{ storage_port | default(22) }}"
+    ansible_user: "{{ storage_user | default('jy') }}"
+    storage_sudo: "{{ storage_sudo | default('sudo -n') }}"
+  tasks:
+    - name: Create and protect home directory
+      ansible.builtin.raw: |
+        set -eu
+        {{ storage_sudo }} mkdir -p '{{ home_dir }}'
+        {{ storage_sudo }} chown '{{ uid }}:{{ gid }}' '{{ home_dir }}'
+        {{ storage_sudo }} chmod 750 '{{ home_dir }}'

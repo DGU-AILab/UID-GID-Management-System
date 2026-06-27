@@ -23,26 +23,42 @@ config/
   google-client.local.json      # Google Sheets 인증 JSON, git ignore
 
 script/
-  common_domain_db.sh
-  create_container.sh
-  delete_container.sh
-  delete_container_with_notification.sh
-  extend_container_expiration.sh
+  uid_manager/                  # Python CLI package
+  playbooks/                    # Ansible building blocks
+  tests/                        # Python unit tests
+  docs/                         # Kerberos/E2E operation docs
+  README.md
+  pyproject.toml
+  requirements.txt
   export_users_to_excel.py
+  send_container_created_email.py
   send_container_deleted_email.py
+  send_container_extended_email.py
   send_expiration_reminder_emails.py
 
-maintenance/
-  delete_expired_containers.sh
-  delete_user.py
-  migrate_add_user_contact_columns.sh
-  sync_containers.sh
-  update_user_emails_from_csv.py
+legacy/
+  script/
+    common_domain_db.sh
+    create_container.sh
+    delete_container.sh
+    delete_container_with_notification.sh
+    extend_container_expiration.sh
+    manage_group.sh
+  maintenance/
+    delete_expired_containers.sh
+    migrate_add_user_contact_columns.sh
+    sync_containers.sh
+  script_test/
+    create_container.sh         # legacy create의 dry-run wrapper
+    delete_container.sh         # legacy delete의 dry-run wrapper
+    extend_container_expiration.sh
+  tests/
+    test_farm_nas_home.sh
+    test_manage_group.sh
 
-script_test/
-  create_container.sh           # 운영 create의 dry-run wrapper
-  delete_container.sh           # 운영 delete의 dry-run wrapper
-  extend_container_expiration.sh
+maintenance/
+  delete_user.py
+  update_user_emails_from_csv.py
 ```
 
 ## 운영 전제
@@ -58,10 +74,11 @@ script_test/
 
 ### 1. 컨테이너 생성
 
-실제 실행 예시:
+Python CLI 실제 실행 예시:
 
 ```bash
-bash script/create_container.sh \
+cd ~/uid/script
+python3 -B -m uid_manager.cli create-container \
   --server-id LAB10 \
   --name "홍길동" \
   --username hong \
@@ -72,15 +89,19 @@ bash script/create_container.sh \
   --created-by jy \
   --email hong@example.com \
   --phone 010-1234-5678 \
-  --note "initial create" \
-  --no-container-name \
-  --no-additional-ports
+  --note "initial create"
 ```
 
+기존 shell flow는 rollback/비교용으로 `legacy/script/create_container.sh`에 보관되어 있으며 같은 `--no-db-record` 옵션을 지원한다.
+
 - `--server-id LAB10` 또는 `--domain LAB --server-number 10` 모두 지원.
-- `--no-container-name`: 기본 이름 규칙 `username_by_createdby` 사용.
-- `--no-additional-ports`: SSH/Jupyter 기본 포트만 할당.
-- `--enable-vnc true` 또는 `--enable_vnc true`: 컨테이너 내부 `6080` 포트 추가 매핑, Docker 환경변수 `ENABLE_VNC=true` 전달. 외부 포트는 기존 포트 배정 방식으로 자동 선택.
+- `--container-name` 생략 시 기본 이름 규칙 `username_by_createdby` 사용.
+- `--container-ports 6006,7860`: SSH/Jupyter 기본 포트 외 추가 컨테이너 포트 매핑.
+- `--enable-vnc`: 컨테이너 내부 `6080` 포트 추가 매핑, Docker 환경변수 `ENABLE_VNC=true` 전달. 외부 포트는 기존 포트 배정 방식으로 자동 선택. Legacy shell은 `--enable-vnc true` 또는 `--enable_vnc true`도 지원한다.
+- `--enable-kerberos`: Python CLI에서는 FARM Kerberized NFS opt-in으로 동작한다. Kerberos principal/keytab, Kerberized NFS mount source, host ccache directory, `KRB5CCNAME`, `/etc/krb5.conf` bind mount를 준비한다. keytab은 target host root-only secret으로만 보관하고 컨테이너에는 ccache만 공유한다. Legacy shell은 `--enable-kerberos true` 또는 `--enable_kerberos true`도 지원하며, FARM Samba AD/Synology NAS와 LAB storage MIT Kerberos PoC 흐름을 포함한다.
+- `--rotate-kerberos-keytab`: 기존 AD user password를 재설정하고 새 keytab을 export한다. 기존 ticket은 만료 시각까지 유효할 수 있으므로 유출 대응 시 ticket lifetime도 함께 고려한다. Legacy shell은 `--rotate-kerberos-keytab true` 또는 `--rotate_kerberos_keytab true`도 지원한다.
+- `--no-db-record`: DB를 읽어 UID/GID와 포트 계획은 세우지만, 원격 Docker 컨테이너 생성 후 `user`, `group`, `used_ids`, `used_ports`, `docker_container` 쓰기와 DB backup/export를 건너뛴다. Python CLI는 생성 안내 메일만 보내고, legacy shell도 같은 목적으로 사용할 수 있다.
+- FARM Kerberos 모드에서 `--group groupA`를 지정하면 create script가 DB group뿐 아니라 AD group `groupA`의 `gidNumber/msSFU30*`와 user membership도 자동으로 보장한다. 이후 컨테이너 내부의 primary group도 `groupA`가 된다.
 - `--user-password` 생략 시 12자리 영문/숫자 초기 Ubuntu 비밀번호 자동 생성.
 - `--vnc-password` 생략 + VNC 활성화 시 8자리 영문/숫자 초기 VNC 비밀번호 자동 생성. VNC 비밀번호는 최대 8자.
 
@@ -90,17 +111,24 @@ bash script/create_container.sh \
 2. `LAB_DB_HOST` 또는 `FARM_DB_HOST` 로 DB host 결정. `ANSIBLE_INVENTORY` 안의 `lab10` / `farmN` alias 확인.
 3. 관리 서버에서 MySQL 접속 확인. dry-run도 DB 읽기 필요.
 4. DB의 `used_ports` 조회 후 포트 배정. 서버 번호 `N` 의 포트 블록은 `9000 + 100 * (N - 1)` 부터 `9000 + 100 * N - 1` 까지. SSH `22`, Jupyter `8888` 에 외부 포트 2개 우선 배정. VNC와 추가 포트는 남은 포트 순차 배정.
-5. DB의 `user`, `group`, `used_ids` 조회 후 UID/GID 결정. 기존 username은 UID 재사용. 신규 username은 `used_ids` 최댓값 다음 번호 사용. group이 비어 있으면 username을 group으로 사용.
-6. `--dry-run` 인 경우 원격 Docker 실행, DB 쓰기, 백업, export, 메일 발송 없이 계획만 출력 후 종료.
+5. DB의 `user`, `group`, `used_ids`, `user_group_membership` 조회 후 UID/GID 결정. 기존 username은 UID 재사용. 신규 username은 `used_ids` 최댓값 다음 번호 사용. group이 비어 있으면 username을 group으로 사용. 기존 user의 supplemental group은 컨테이너에 `DECS_SUPPLEMENTAL_GROUPS`로 전달한다.
+6. `--dry-run` 인 경우 원격 Docker 실행, LAB storage/FARM NAS 홈 생성, DB 쓰기, 백업, export, 메일 발송 없이 계획만 출력 후 종료.
 7. 대상 서버에서 Ansible shell로 `docker image inspect dguailab/<image>:<version>` 실행. 이미지가 없으면 `docker pull`.
-8. DB transaction 시작.
-9. 대상 서버에서 Ansible shell로 `docker run -dit ...` 실행. 주요 옵션: GPU 전체 사용, 메모리 `192g`, `--runtime=nvidia`, `/home/takoN/share/user-share/` bind mount, `USER_ID`, `UID`, `GID`, `USER_PW`, `USER_GROUP` 환경변수 전달.
-10. 생성된 container id 형식 확인. `docker inspect` 와 `docker port` 로 컨테이너와 SSH 포트 바인딩 검증.
-11. 같은 transaction 안에서 `used_ids`, `used_ports`, `group`, `user`, `docker_container` 기록. `used_ports.docker_container_record_id` 를 새 `docker_container.id` 로 연결.
-12. DB transaction commit.
-13. 생성 안내 메일 발송. SSH/Jupyter/VNC 접속 정보와 초기 비밀번호 포함.
-14. 도메인 DB를 `BACKUP_ROOT_DIR/<domain>/nfs_db_backup_YYYYMMDD_HHMMSS.sql.gz` 로 백업.
-15. `script/export_users_to_excel.py --domains LAB,FARM` 실행. Excel/Google Sheets export 갱신.
+8. Kerberos 모드면 principal을 확인/생성하고 target host에 사용자별 keytab을 `root:root 0400`으로 export한다. FARM은 Samba AD에서 principal/keytab과 AD group을 관리하고, LAB은 storage 서버의 MIT Kerberos KDC에서 principal/keytab을 관리한다. FARM에서 `--group`이 username과 다르면 같은 이름의 AD group을 만들거나 갱신하고, `gidNumber/msSFU30*`와 user membership도 보장한다. `--rotate-kerberos-keytab true`면 password를 재설정한 뒤 keytab을 새로 export한다.
+9. LAB이면 storage 서버에 raw Ansible SSH로 접속해 홈 디렉토리를 미리 생성한다. LAB 일반 모드는 `LAB_STORAGE_USER_SHARE_ROOT/<username>`을 컨테이너 `UID:GID`, `750` 권한으로 만들고, LAB Kerberos 모드는 `LAB_KERBEROS_STORAGE_USER_SHARE_ROOT/<username>`을 같은 `UID:GID`, `750` 권한으로 만든다. FARM이면 NAS에 raw Ansible SSH로 접속해 홈 디렉토리를 미리 생성한다. FARM 일반 모드는 `FARM_NAS_USER_SHARE_ROOT/<username>`을 컨테이너 `UID:GID`, `750` 권한으로 만든다. FARM Kerberos 모드는 `FARM_KERBEROS_NAS_USER_SHARE_ROOT/<username>`을 NAS의 AD-mapped UID/GID, `750` 권한으로 만든다.
+10. FARM Kerberos 모드면 NAS `svcgssd`/`idmapd`를 재시작하고 `/proc/net/rpc/*/flush`를 갱신해 Synology Kerberos NFS owner/group mapping cache를 비운다. 이 동작은 `FARM_KERBEROS_NAS_RESTART_GSS_SERVICES=false`로 비활성화할 수 있다.
+11. FARM Kerberos 모드에서 AD group을 쓰면 target host의 NFSv4 idmapper가 `FARM\<group>`을 해석할 수 있도록 host local group/user shadow entry를 준비한다. 컨테이너 runtime GID는 DB GID가 아니라 NAS AD-mapped group GID를 사용한다.
+12. Kerberos 모드면 target host에 `/usr/local/sbin/decs-krb-refresh`, `decs-krb-refresh@<username>.timer`, root-only refresh env를 설치하고 `/run/user/<uid>/krb5cc` ticket을 `kinit -kt`로 발급한다.
+13. Kerberos 모드면 target host에서 실제 NFS home write check를 수행한다. FARM은 첫 check가 실패하면 NAS GSS/RPC cache를 한 번 더 refresh하고 재시도한다. 그래도 실패하면 DB/container 생성 전에 중단한다. LAB은 storage-side Kerberos home/keytab 준비 후 LAB host mount에서 write check를 통과해야 진행한다.
+14. 대상 서버에서 Ansible shell로 `docker run -dit ...` 실행. 주요 옵션: GPU 전체 사용, 메모리 `192g`, `--runtime=nvidia`, `/home/takoN/share/user-share/` 또는 Kerberos mount root bind mount, `USER_ID`, `UID`, `GID`, `USER_PW`, `USER_GROUP` 환경변수 전달. `UID/GID`는 항상 DB/AD `uidNumber/gidNumber` 기준 값이며, Synology NAS 내부 winbind UID/GID를 Docker runtime identity로 전달하지 않는다. Kerberos 모드에서는 `DECS_USER_SUDO_MODE=restricted`도 전달해 package install용 sudo는 남기고 UID spoofing으로 이어지는 root 실행 경로를 막는다. 기존 user에게 supplemental group membership이 있으면 `DECS_SUPPLEMENTAL_GROUPS=groupA:gid,groupB:gid`도 전달한다.
+15. 생성된 container id 형식 확인. `docker inspect` 와 `docker port` 로 컨테이너와 SSH 포트 바인딩 검증.
+16. `--no-db-record`이면 생성 안내 메일만 보낸 뒤 DB transaction, backup, export 없이 종료한다.
+17. DB transaction 시작.
+18. 같은 transaction 안에서 `used_ids`, `used_ports`, `group`, `user`, `docker_container` 기록. `used_ports.docker_container_record_id` 를 새 `docker_container.id` 로 연결.
+19. DB transaction commit.
+20. 생성 안내 메일 발송. SSH/Jupyter/VNC 접속 정보와 초기 비밀번호 포함.
+21. 도메인 DB를 `BACKUP_ROOT_DIR/<domain>/nfs_db_backup_YYYYMMDD_HHMMSS.sql.gz` 로 백업.
+22. `script/export_users_to_excel.py --domains LAB,FARM` 실행. Excel/Google Sheets export 갱신.
 
 생성 실패 처리:
 
@@ -108,12 +136,49 @@ bash script/create_container.sh \
 - 원격 Docker 컨테이너 생성 후 DB 기록/검증 실패 시 `docker rm -f` 로 방금 만든 컨테이너 제거 후 rollback.
 - commit 이후 메일, 백업, export 실패는 생성 자체 rollback 대상 아님. 메일 실패는 로그 기록, 백업 실패는 무시 후 진행.
 
+### Kerberos 그룹 관리
+
+FARM Kerberos group sharing은 Python CLI의 `uidctl manage-group`으로 관리한다. 이 명령은 UID DB의 `group` / `user_group_membership`과 Samba AD group/member를 같이 맞춘다. 기존 shell 구현은 `legacy/script/manage_group.sh`에 보관되어 있다.
+
+Python CLI 예시:
+
+```bash
+cd ~/uid/script
+python3 -B -m uid_manager.cli manage-group ensure --group project_a
+python3 -B -m uid_manager.cli manage-group add-user --group project_a --user alice
+python3 -B -m uid_manager.cli manage-group add-user --group project_a --users alice,bob
+python3 -B -m uid_manager.cli manage-group remove-user --group project_a --user alice
+python3 -B -m uid_manager.cli manage-group set-primary --group project_a --user alice
+python3 -B -m uid_manager.cli manage-group show --group project_a
+python3 -B -m uid_manager.cli manage-group delete --group project_a --force
+```
+
+Legacy shell 예시:
+
+```bash
+bash legacy/script/manage_group.sh ensure --group project_a
+bash legacy/script/manage_group.sh add-user --group project_a --user alice
+bash legacy/script/manage_group.sh add-user --group project_a --users alice,bob
+bash legacy/script/manage_group.sh remove-user --group project_a --user alice
+bash legacy/script/manage_group.sh set-primary --group project_a --user alice
+bash legacy/script/manage_group.sh show --group project_a
+bash legacy/script/manage_group.sh delete --group project_a --force
+```
+
+- `ensure`: DB group을 만들고 FARM AD group의 `gidNumber/msSFU30*`를 보장한다.
+- `add-user`: AD group member를 추가하고 DB supplemental membership을 기록한다. 다음 Kerberos 컨테이너 생성/재생성 때 NAS AD-mapped GID를 조회해 `DECS_SUPPLEMENTAL_GROUPS`로 컨테이너 local group에도 반영한다.
+- `set-primary`: 사용자의 primary DB group을 바꾸고 AD membership도 보장한다.
+- `remove-user`: supplemental membership만 제거한다. primary group은 먼저 다른 group으로 바꿔야 제거할 수 있다.
+- `delete`: primary user가 없는 group만 삭제한다. supplemental membership이 남아 있으면 `--force`가 필요하다.
+
+사용자는 컨테이너 안에서 `group-dir-share ~/sharing_dir project_a`를 실행해 자기 home 내부 디렉토리를 직접 공유한다. FARM Kerberos NFS에서는 target host의 NFSv4 idmapper가 group owner를 `FARM\project_a` 형식으로 해석해야 하므로 create script가 host local shadow group을 자동 준비한다. LAB Kerberos NFS에서는 storage와 LAB Docker host의 NFSv4 idmap domain이 모두 `lab.decs.internal`이어야 `chgrp`와 owner/group 표시가 정상 동작한다.
+
 ### 2. 컨테이너 삭제
 
 사용자 삭제 안내 메일까지 보내는 실제 실행 예시:
 
 ```bash
-bash script/delete_container_with_notification.sh \
+bash legacy/script/delete_container_with_notification.sh \
   --server-id LAB10 \
   --container-name hong_by_jy
 ```
@@ -121,22 +186,22 @@ bash script/delete_container_with_notification.sh \
 삭제 대상 조회 방식:
 
 ```bash
-bash script/delete_container_with_notification.sh --server-id LAB10 --container-name hong_by_jy
-bash script/delete_container_with_notification.sh --server-id LAB10 --container-id abc123
-bash script/delete_container_with_notification.sh --server-id LAB10 --username hong
-bash script/delete_container_with_notification.sh --server-id LAB10 --name "홍길동" --port 9050
+bash legacy/script/delete_container_with_notification.sh --server-id LAB10 --container-name hong_by_jy
+bash legacy/script/delete_container_with_notification.sh --server-id LAB10 --container-id abc123
+bash legacy/script/delete_container_with_notification.sh --server-id LAB10 --username hong
+bash legacy/script/delete_container_with_notification.sh --server-id LAB10 --name "홍길동" --port 9050
 ```
 
 - `--container-id`: Docker container id prefix 검색.
 - `--container-name`: DB의 `docker_container.container_name` 과 정확히 일치 필요.
 - `--name`, `--username`, `--port`: DB 필터. 여러 컨테이너 매칭 시 중단. 필터 축소 필요.
-- 삭제 안내 메일 필요 시 `script/delete_container_with_notification.sh` 사용. `script/delete_container.sh` 직접 실행 시 삭제만 수행, 메일 미발송.
+- 삭제 안내 메일 필요 시 `legacy/script/delete_container_with_notification.sh` 사용. `legacy/script/delete_container.sh` 직접 실행 시 삭제만 수행, 메일 미발송.
 - wrapper는 삭제 전 사용자 이메일/포트/만료일 메타데이터 조회 필요. 운영에서는 `--server-id` 또는 `--domain` + `--server-number` 명시 권장.
 
 삭제 내부 파이프라인:
 
 1. `delete_container_with_notification.sh` 가 삭제 전 DB record 조회. 사용자 이름, username, email, port 목록, 만료일 저장. 삭제 성공 후 메일 발송에 사용.
-2. wrapper가 같은 인자를 `script/delete_container.sh` 로 전달해 실제 삭제 실행.
+2. wrapper가 같은 인자를 `legacy/script/delete_container.sh` 로 전달해 실제 삭제 실행.
 3. `delete_container.sh` 가 `config/db_config.local.env` 로드. server id를 `domain`, `server_number`, Ansible host alias로 변환.
 4. 도메인 DB에서 활성 컨테이너(`docker_container.existing = 1`) 조회. DB record의 `server_id` 가 요청 server id와 다르면 `--force` 없이는 중단.
 5. 실제 DB record의 server id에서 Ansible host alias 재계산. 예: DB record가 `LAB10` 이면 원격 삭제 대상은 `lab10`.
@@ -182,7 +247,7 @@ python3 script/export_users_to_excel.py --domains LAB,FARM
 dry-run:
 
 ```bash
-bash script/extend_container_expiration.sh \
+bash legacy/script/extend_container_expiration.sh \
   --username hong \
   --expiration-date 2026-04-30 \
   --dry-run
@@ -191,7 +256,7 @@ bash script/extend_container_expiration.sh \
 실제 반영:
 
 ```bash
-bash script/extend_container_expiration.sh \
+bash legacy/script/extend_container_expiration.sh \
   --username hong \
   --expiration-date 2026-04-30 \
   --apply
@@ -200,7 +265,7 @@ bash script/extend_container_expiration.sh \
 포트로 특정 컨테이너 조회 가능.
 
 ```bash
-bash script/extend_container_expiration.sh \
+bash legacy/script/extend_container_expiration.sh \
   --port 9050 \
   --expiration-date 2026-04-30 \
   --apply
@@ -250,7 +315,7 @@ python3 script/send_expiration_reminder_emails.py \
 ### 생성 dry-run
 
 ```bash
-bash script_test/create_container.sh \
+bash legacy/script_test/create_container.sh \
   --server-id FARM2 \
   --name "홍길동" \
   --username hong \
@@ -269,7 +334,7 @@ bash script_test/create_container.sh \
 ### 삭제 dry-run
 
 ```bash
-bash script_test/delete_container.sh \
+bash legacy/script_test/delete_container.sh \
   --server-id FARM2 \
   --container-name hong_by_jy
 ```
@@ -277,7 +342,7 @@ bash script_test/delete_container.sh \
 ### 만료일 연장 dry-run
 
 ```bash
-bash script_test/extend_container_expiration.sh \
+bash legacy/script_test/extend_container_expiration.sh \
   --username hong \
   --expiration-date 2026-04-30
 ```
@@ -290,22 +355,19 @@ bash script_test/extend_container_expiration.sh \
 
 ## maintenance 스크립트
 
-`maintenance/` 아래 스크립트는 정기 운영보다는 데이터 보정/정리/마이그레이션 성격.
+`maintenance/` 아래 Python 스크립트는 정기 운영보다는 데이터 보정/정리 성격. 기존 shell maintenance는 `legacy/maintenance/`에 보관한다.
 
 - `delete_user.py`
-- `delete_expired_containers.sh`
-- `migrate_add_user_contact_columns.sh`
-- `sync_containers.sh`
 - `update_user_emails_from_csv.py`
 
-`maintenance/delete_expired_containers.sh --apply`: 내부적으로 `script/delete_container_with_notification.sh` 호출. 실제 삭제 시 사용자 삭제 안내 메일도 함께 발송.
+`legacy/maintenance/delete_expired_containers.sh --apply`: 내부적으로 `legacy/script/delete_container_with_notification.sh` 호출. 실제 삭제 시 사용자 삭제 안내 메일도 함께 발송.
 
-`maintenance/sync_containers.sh`: 현재 관리 서버 구조로 재설계된 상태 아님. 운영 메인 플로우와 별개 취급 권장.
+`legacy/maintenance/sync_containers.sh`: 현재 관리 서버 구조로 재설계된 상태 아님. 운영 메인 플로우와 별개 취급 권장.
 
 만료된 활성 컨테이너 조회 또는 일괄 삭제:
 
 ```bash
-bash maintenance/delete_expired_containers.sh --dry-run
+bash legacy/maintenance/delete_expired_containers.sh --dry-run
 ```
 
 옵션 없이 실행해도 동일하게 dry-run 조회만 수행.
@@ -313,7 +375,7 @@ bash maintenance/delete_expired_containers.sh --dry-run
 실제 삭제:
 
 ```bash
-bash maintenance/delete_expired_containers.sh --apply
+bash legacy/maintenance/delete_expired_containers.sh --apply
 ```
 
 이메일 CSV 업데이트를 도메인별 DB에 적용:
@@ -444,6 +506,41 @@ DB_HOST=127.0.0.1
 ANSIBLE_INVENTORY=/home/jy/ansible/inventory.ini
 BACKUP_ROOT_DIR=/home/jy/uid/mysql_backups
 
+LAB_STORAGE_HOST=192.168.1.20
+LAB_STORAGE_PORT=6953
+LAB_STORAGE_USER=jy
+LAB_STORAGE_USER_SHARE_ROOT=/294t/dcloud/share/user-share
+LAB_STORAGE_SUDO="sudo -n"
+LAB_HOST_USER_SHARE_ROOT_TEMPLATE=/home/tako{server_number}/share/user-share
+
+FARM_NAS_HOST=192.168.2.30
+FARM_NAS_PORT=6954
+FARM_NAS_USER=jy
+FARM_NAS_USER_SHARE_ROOT=/volume1/share/user-share
+FARM_NAS_SUDO="sudo -n"
+
+FARM_KERBEROS_AD_NETBIOS=FARM
+FARM_KERBEROS_REALM=FARM.DECS.INTERNAL
+FARM_KERBEROS_NIS_DOMAIN=farm
+FARM_KERBEROS_AD_DC_HOST=farm2
+FARM_KERBEROS_NAS_USER_SHARE_ROOT=/volume1/test_krb/user-share
+FARM_KERBEROS_NAS_RESTART_GSS_SERVICES=true
+FARM_KERBEROS_NAS_SVCGSSD=/usr/sbin/svcgssd
+FARM_KERBEROS_NAS_IDMAPD=/usr/sbin/idmapd
+FARM_KERBEROS_NAS_NFS_PRINCIPAL=nfs/nas.farm.decs.internal@FARM.DECS.INTERNAL
+FARM_KERBEROS_MOUNT_USER_SHARE_ROOT=/mnt/nas-krb-test-v4/user-share
+FARM_KERBEROS_CCACHE_BASE=/run/user
+FARM_KERBEROS_KRB5_CONF=/etc/krb5.conf
+FARM_KERBEROS_KEYTAB_DIR=/etc/decs-krb/keytabs
+FARM_KERBEROS_REFRESH_ENV_DIR=/etc/decs-krb/refresh.d
+FARM_KERBEROS_REFRESH_INTERVAL=1h
+FARM_KERBEROS_NAS_IDENTITY_RETRIES=12
+FARM_KERBEROS_NAS_IDENTITY_RETRY_DELAY=5
+FARM_KERBEROS_NFS_ACCESS_INITIAL_DELAY=30
+FARM_KERBEROS_NFS_ACCESS_RETRIES=12
+FARM_KERBEROS_NFS_ACCESS_RETRY_DELAY=5
+KERBEROS_REMOTE_SUDO="sudo -n"
+
 EXPORT_DOMAINS=LAB,FARM
 SERVER_DOMAIN=LAB
 ```
@@ -461,6 +558,45 @@ SERVER_DOMAIN=LAB
 | `DB_HOST` | 일부 legacy/maintenance 스크립트용 단일 DB host fallback. LAB/FARM 분리 운영에서는 `LAB_DB_HOST`, `FARM_DB_HOST` 우선. |
 | `ANSIBLE_INVENTORY` | create/delete가 원격 Docker 명령을 실행할 Ansible inventory 절대 경로. |
 | `BACKUP_ROOT_DIR` | create/delete 성공 후 `mysqldump` 백업 저장용 관리 서버 로컬 디렉토리. 생략 시 `mysql_backups/` 사용. |
+| `LAB_STORAGE_HOST`, `LAB_STORAGE_PORT`, `LAB_STORAGE_USER` | LAB 컨테이너 생성 전 사용자 홈 디렉토리를 미리 만들 storage 서버 SSH 접속 정보. |
+| `LAB_STORAGE_SSH_KEY` | LAB storage 접속에 사용할 SSH private key. 생략 시 SSH 기본 키 사용. |
+| `LAB_STORAGE_SSH_COMMON_ARGS` | LAB storage 접속에 ProxyJump 같은 추가 SSH 옵션이 필요할 때 사용. 예: `-o ProxyJump=jy@192.168.1.12:8082`. |
+| `LAB_STORAGE_USER_SHARE_ROOT` | LAB storage 서버의 실제 사용자 홈 root. 기본값: `/294t/dcloud/share/user-share`. |
+| `LAB_STORAGE_SUDO` | LAB storage에서 `mkdir/chown/chmod` 앞에 붙일 명령. 기본값: `sudo -n`. |
+| `LAB_HOST_USER_SHARE_ROOT_TEMPLATE` | LAB Docker host에서 컨테이너 `/home`으로 bind mount할 NFS mount root template. `{server_number}`가 LAB 번호로 치환된다. 기본값: `/home/tako{server_number}/share/user-share`. |
+| `LAB_KERBEROS_REALM` | LAB Kerberos realm. 기본값: `LAB.DECS.INTERNAL`. |
+| `LAB_KERBEROS_STORAGE_USER_SHARE_ROOT` | LAB Kerberos PoC에서 storage 서버에 생성할 실제 home root. 기본값: `/294t/share/test-krb/user-share`. |
+| `LAB_KERBEROS_MOUNT_USER_SHARE_ROOT` | LAB Kerberos PoC에서 대상 LAB host가 bind mount할 NFSv4.1 `sec=krb5p` mount root. 기본값: `/mnt/decs-lab-test-krb/user-share`. |
+| `LAB_KERBEROS_CCACHE_BASE` | host `rpc.gssd`가 볼 user ccache base. 기본값 `/run/user`; 실제 ccache는 `/run/user/<uid>/krb5cc`. |
+| `LAB_KERBEROS_KRB5_CONF` | 컨테이너에 read-only bind mount할 LAB host Kerberos 설정 파일. 기본값 `/etc/krb5.conf`. |
+| `LAB_KERBEROS_KEYTAB_DIR` | target LAB host에 보관할 사용자별 keytab root. 기본값: `/etc/decs-krb/keytabs`; 파일 권한은 `root:root 0400`. |
+| `LAB_KERBEROS_STORAGE_KEYTAB_DIR` | LAB storage 서버에서 생성/보관할 사용자별 keytab root. 기본값: `/root/decs-lab-test-krb/keytabs`. |
+| `LAB_KERBEROS_REFRESH_ENV_DIR` | `decs-krb-refresh@.service`가 읽을 root-only env 파일 root. 기본값: `/etc/decs-krb/refresh.d`. |
+| `FARM_NAS_HOST`, `FARM_NAS_PORT`, `FARM_NAS_USER` | FARM 컨테이너 생성 전 사용자 홈 디렉토리를 미리 만들 NAS SSH 접속 정보. |
+| `FARM_NAS_SSH_KEY` | FARM NAS 접속에 사용할 SSH private key. 생략 시 SSH 기본 키 사용. |
+| `FARM_NAS_USER_SHARE_ROOT` | FARM 서버의 `/home/takoN/share/user-share/` 에 대응하는 NAS 실제 경로. 기본값: `/volume1/share/user-share`. |
+| `FARM_NAS_SUDO` | NAS에서 `mkdir/chown/chmod` 앞에 붙일 명령. 기본값: `sudo -n`. root 계정 접속이면 빈 값으로 설정 가능. |
+| `FARM_KERBEROS_AD_NETBIOS` | NAS winbind 조회와 target host NFSv4 idmapper용 `FARM\<group>` shadow group 이름에 사용할 AD NetBIOS domain. 기본값: `FARM`. |
+| `FARM_KERBEROS_REALM` | Kerberos realm. 기본값: `FARM.DECS.INTERNAL`. |
+| `FARM_KERBEROS_NIS_DOMAIN` | Samba RFC2307/msSFU30 NIS domain. 기본값: `farm`. Synology Kerberos NFS 신규 user mapping에 필요하다. |
+| `FARM_KERBEROS_AD_DC_HOST` | AD principal/keytab을 관리할 Ansible host alias. 현재 PoC keytab mode는 target host와 이 값이 같아야 한다. 기본값: `farm2`. |
+| `FARM_KERBEROS_NAS_USER_SHARE_ROOT` | Kerberos 모드에서 NAS에 생성할 실제 home root. PoC 기본값: `/volume1/test_krb/user-share`. |
+| `FARM_KERBEROS_NAS_RESTART_GSS_SERVICES` | 신규 AD user 생성 후 Synology NAS `svcgssd`/`idmapd`를 재시작하고 RPC identity cache를 flush해 Kerberos NFS owner/group mapping cache를 갱신할지 여부. 기본값 `true`. Kerberos NFS 세션에 짧은 영향이 있을 수 있어 운영 전 검토 필요. |
+| `FARM_KERBEROS_NAS_SVCGSSD` | NAS `svcgssd` 경로. 기본값 `/usr/sbin/svcgssd`. |
+| `FARM_KERBEROS_NAS_IDMAPD` | NAS `idmapd` 경로. 기본값 `/usr/sbin/idmapd`. |
+| `FARM_KERBEROS_NAS_NFS_PRINCIPAL` | NAS `svcgssd` 시작 시 사용할 NFS service principal. PoC 기본값 `nfs/nas.farm.decs.internal@FARM.DECS.INTERNAL`. |
+| `FARM_KERBEROS_MOUNT_USER_SHARE_ROOT` | Kerberos 모드에서 대상 FARM host가 bind mount할 NFSv4.1 `sec=krb5p` mount root. PoC 기본값: `/mnt/nas-krb-test-v4/user-share`. |
+| `FARM_KERBEROS_CCACHE_BASE` | host `rpc.gssd`가 볼 user ccache base. 기본값 `/run/user`; 실제 ccache는 `/run/user/<uid>/krb5cc`. |
+| `FARM_KERBEROS_KRB5_CONF` | 컨테이너에 read-only bind mount할 host Kerberos 설정 파일. 기본값 `/etc/krb5.conf`. |
+| `FARM_KERBEROS_KEYTAB_DIR` | target host에 보관할 사용자별 keytab root. 기본값: `/etc/decs-krb/keytabs`; 파일 권한은 `root:root 0400`. |
+| `FARM_KERBEROS_REFRESH_ENV_DIR` | `decs-krb-refresh@.service`가 읽을 root-only env 파일 root. 기본값: `/etc/decs-krb/refresh.d`. |
+| `FARM_KERBEROS_REFRESH_INTERVAL` | systemd timer refresh 주기. 기본값: `1h`. |
+| `FARM_KERBEROS_NAS_IDENTITY_RETRIES` | AD user 생성 직후 NAS winbind UID/GID 조회 재시도 횟수. 기본값: `12`. |
+| `FARM_KERBEROS_NAS_IDENTITY_RETRY_DELAY` | NAS winbind UID/GID 조회 재시도 간격 초. 기본값: `5`. |
+| `FARM_KERBEROS_NFS_ACCESS_INITIAL_DELAY` | AD/msSFU/NAS home 준비 후 첫 NFS write check 전 대기 초. 너무 빨리 접근하면 UID별 GSS 실패 context가 남을 수 있어 기본값은 `30`. |
+| `FARM_KERBEROS_NFS_ACCESS_RETRIES` | host-managed ticket으로 실제 NFS home write check 재시도 횟수. 기본값: `12`. |
+| `FARM_KERBEROS_NFS_ACCESS_RETRY_DELAY` | 실제 NFS home write check 재시도 간격 초. 기본값: `5`. |
+| `KERBEROS_REMOTE_SUDO` | 대상 FARM host에서 ccache directory, host idmapper shadow user/group, refresh service를 만들 때 사용할 sudo 명령. 기본값 `sudo -n`. |
 | `EXPORT_DOMAINS` | export 기본 대상 도메인 CSV. 보통 `LAB,FARM`. |
 | `SERVER_DOMAIN` | `EXPORT_DOMAINS` 가 없을 때 일부 스크립트가 참고하는 fallback 도메인. 단일 도메인 운영 시 사용. |
 
@@ -508,7 +644,36 @@ ansible lab10 -i /home/jy/ansible/inventory.ini -m shell -a "docker ps"
 - `ansible_user` 의 passwordless SSH 접속 가능.
 - `ansible_user` 의 `sudo` 없는 `docker` 명령 실행 가능.
 - GPU 컨테이너 생성에 필요한 Docker/NVIDIA runtime 준비.
-- create 스크립트는 `/home/tako서버번호/share/user-share/` 를 컨테이너 `/home/` 에 bind mount. 예: `LAB10` 은 `/home/tako10/share/user-share/` 사용.
+- create 스크립트는 LAB에서 `LAB_HOST_USER_SHARE_ROOT_TEMPLATE` 를 컨테이너 `/home/` 에 bind mount. 기본값 예: `LAB10` 은 `/home/tako10/share/user-share/` 사용.
+- LAB storage 또는 FARM NAS에 root_squash가 있으면 컨테이너 root가 신규 홈 디렉토리를 만들 수 없다. create 스크립트가 컨테이너 실행 전에 LAB storage에는 `LAB_STORAGE_USER_SHARE_ROOT/<username>`, FARM NAS에는 `FARM_NAS_USER_SHARE_ROOT/<username>` 을 raw Ansible SSH로 미리 생성하고 UID/GID 소유권을 맞춘다.
+- LAB storage SSH 계정은 `sudo -n mkdir/chown/chmod` 를 실행할 수 있어야 한다. 예:
+
+```sudoers
+jy ALL=(root) NOPASSWD: /usr/bin/mkdir -p /294t/dcloud/share/user-share/*, /usr/bin/chown [0-9]*\:[0-9]* /294t/dcloud/share/user-share/*, /usr/bin/chmod 750 /294t/dcloud/share/user-share/*
+```
+
+- FARM NAS SSH 계정은 `sudo -n mkdir/chown/chmod` 를 실행할 수 있어야 한다. 예:
+
+```sudoers
+User_Alias DECS_NAS_PROVISIONERS = jy, dongmin0204, hyrn268, uugaemi, suhyeon, garyoung
+DECS_NAS_PROVISIONERS ALL=(root) NOPASSWD: /usr/bin/mkdir -p /volume1/share/user-share/*, /usr/bin/chown [0-9]*\:[0-9]* /volume1/share/user-share/*, /usr/bin/chmod 750 /volume1/share/user-share/*
+```
+
+- Kerberized NFS는 아직 운영 mount가 아니라 PoC로 분리한다. 현재 확인된 범위는 farm2 Samba AD DC + Synology NAS `test_krb` 공유 + farm2 병렬 mount다.
+  - AD realm: `FARM.DECS.INTERNAL`
+  - AD DC: `dc1.farm.decs.internal` / `100.100.100.102`
+  - NAS test share: `nas.farm.decs.internal:/volume1/test_krb`
+  - 성공한 mount: `/mnt/nas-krb-test-v4`, `vers=4.1,sec=krb5p`
+  - host root-only keytab으로 만든 `/run/user/<uid>/krb5cc`를 host `rpc.gssd`가 사용해 NFSv4.1 read/write 하는 것까지 확인했다.
+  - keytab은 DB에 저장하지 않는다. DB에는 필요 시 `kerberos_enabled`, `principal`, `rotated_at` 같은 메타데이터만 추가하고 secret은 target host root-only filesystem에 둔다.
+  - 재현 절차와 rollback은 `docs/kerberized-nfs-poc/README.md` 참고.
+  - Python CLI의 `--enable-kerberos`는 현재 FARM Kerberos opt-in이다. Legacy shell의 `--enable-kerberos true`는 LAB/FARM opt-in이며, FARM keytab PoC는 target host가 `FARM_KERBEROS_AD_DC_HOSTS` 중 하나여야 한다. LAB keytab PoC는 LAB storage 서버의 MIT Kerberos KDC와 target LAB host ccache refresh service를 사용한다.
+  - 신규 AD user는 principal/keytab/RFC2307 attrs와 `msSFU30Name/msSFU30NisDomain`을 자동 생성한다. `msSFU30*`가 없으면 Synology NFS server가 신규 Kerberos identity에 write 권한을 주지 않는 케이스가 확인됐다. create script는 실제 NFS write check를 통과할 때만 컨테이너/DB 생성을 진행한다.
+  - Kerberos 모드에서 `--group groupA`처럼 username과 다른 group을 지정하면 create script가 AD group `groupA`의 `gidNumber/msSFU30*`를 보장하고 사용자를 member로 추가한다. 컨테이너 내부 UID/GID는 DB `user.ubuntu_uid/user.ubuntu_gid`를 그대로 사용한다. 사용자는 컨테이너 안에서 `group-dir-share ~/sharing_dir groupA`로 자기 홈 안의 원하는 디렉토리를 직접 공유할 수 있다.
+  - Kerberos 모드의 canonical UID 정책은 `DB user.ubuntu_uid == AD uidNumber == FARM NFS returned UID == container UID`다. create script는 Synology 내부 winbind UID/GID를 NAS ownership 준비에만 사용하고 DB/Docker runtime identity로 저장하거나 전달하지 않는다.
+  - `--ad-username`을 사용하면 컨테이너 username과 Kerberos/AD username을 분리할 수 있다. 예: 컨테이너는 `USER_ID=jy`, home path는 `/volume1/share/user-share/jy`를 유지하되 Kerberos principal은 `farm_jy@FARM.DECS.INTERNAL`로 사용한다. 이 경우에도 AD `uidNumber/gidNumber`는 DB의 `jy` UID/GID와 같아야 한다. 기본값은 `ad_username=username`이다.
+  - Kerberos metadata/secret은 DB에 저장하지 않는다. keytab/ticket secret은 target host root-only filesystem에 둔다.
+
 - Docker 이미지는 `dguailab/<image>:<version>` 형식으로 pull/inspect.
 
 ### 메일 설정

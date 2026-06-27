@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "${PROJECT_ROOT}/script/common_domain_db.sh"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${PROJECT_ROOT}/legacy/script/common_domain_db.sh"
 load_management_config
 load_daily_maintenance_config
 redirect_logs_to_file_if_configured || true
@@ -80,7 +80,7 @@ if [ ${#DOMAINS[@]} -eq 0 ]; then
   exit 1
 fi
 
-DELETE_SCRIPT="${PROJECT_ROOT}/script/delete_container_with_notification.sh"
+DELETE_SCRIPT="${PROJECT_ROOT}/legacy/script/delete_container_with_notification.sh"
 if [ ! -x "${DELETE_SCRIPT}" ]; then
   echo "Error: delete script not found or not executable: ${DELETE_SCRIPT}" >&2
   exit 1

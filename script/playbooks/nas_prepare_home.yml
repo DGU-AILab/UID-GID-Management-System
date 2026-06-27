@@ -1,0 +1,15 @@
+---
+- name: Prepare a FARM NAS home directory
+  hosts: "{{ nas_host }}"
+  gather_facts: false
+  vars:
+    ansible_port: "{{ nas_port | default(6954) }}"
+    ansible_user: "{{ nas_user | default('jy') }}"
+    nas_sudo: "{{ nas_sudo | default('sudo -n') }}"
+  tasks:
+    - name: Create and protect home directory
+      ansible.builtin.raw: |
+        set -eu
+        {{ nas_sudo }} mkdir -p '{{ home_dir }}'
+        {{ nas_sudo }} chown '{{ uid }}:{{ gid }}' '{{ home_dir }}'
+        {{ nas_sudo }} chmod 750 '{{ home_dir }}'

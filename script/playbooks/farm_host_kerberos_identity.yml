@@ -1,0 +1,28 @@
+---
+- name: Prepare FARM host Kerberos NFS shadow identity
+  hosts: "{{ target_host }}"
+  gather_facts: false
+  vars:
+    kerberos_remote_sudo: "{{ kerberos_remote_sudo | default('sudo -n') }}"
+    netbios_domain: "{{ netbios_domain | default('FARM') }}"
+  tasks:
+    - name: Ensure host group and user IDs match NAS Kerberos mapping
+      ansible.builtin.shell: |
+        set -eu
+        host_group='{{ netbios_domain }}\{{ groupname }}'
+        if getent group "$host_group" >/dev/null 2>&1; then
+          current_gid="$(getent group "$host_group" | awk -F: 'NR==1 { print $3 }')"
+          [ "$current_gid" = "{{ gid }}" ]
+        else
+          {{ kerberos_remote_sudo }} groupadd -g "{{ gid }}" "$host_group"
+        fi
+
+        if getent passwd "{{ username }}" >/dev/null 2>&1; then
+          {{ kerberos_remote_sudo }} usermod -g "{{ gid }}" "{{ username }}"
+        else
+          {{ kerberos_remote_sudo }} useradd -u "{{ uid }}" -g "{{ gid }}" -M -N -s /usr/sbin/nologin "{{ username }}"
+        fi
+
+        if command -v nfsidmap >/dev/null 2>&1; then
+          {{ kerberos_remote_sudo }} nfsidmap -c >/dev/null 2>&1 || true
+        fi

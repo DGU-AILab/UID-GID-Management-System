@@ -3,7 +3,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 source "${SCRIPT_DIR}/common_domain_db.sh"
 load_management_config
@@ -61,13 +61,13 @@ for domain_name in "${DOMAINS[@]}"; do
 done
 
 log_event "REMINDER" "reminder_run_started domains=${domains_arg}"
-if ! python3 "${SCRIPT_DIR}/send_expiration_reminder_emails.py" --domains "${domains_arg}"; then
+if ! python3 "${PROJECT_ROOT}/script/send_expiration_reminder_emails.py" --domains "${domains_arg}"; then
   log_error "reminder_run_failed domains=${domains_arg}"
   failures=$((failures + 1))
 fi
 
 log_event "DELETE" "expired_cleanup_started domains=${domains_arg}"
-if ! bash "${PROJECT_ROOT}/maintenance/delete_expired_containers.sh" --domains "${domains_arg}" --apply; then
+if ! bash "${PROJECT_ROOT}/legacy/maintenance/delete_expired_containers.sh" --domains "${domains_arg}" --apply; then
   log_error "expired_cleanup_failed domains=${domains_arg}"
   failures=$((failures + 1))
 fi

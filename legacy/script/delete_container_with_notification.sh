@@ -2,13 +2,13 @@
 
 set -uo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "${PROJECT_ROOT}/script/common_domain_db.sh"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${PROJECT_ROOT}/legacy/script/common_domain_db.sh"
 load_management_config
 
 trap cleanup_mysql_client_config EXIT
 
-RAW_DELETE_SCRIPT="${PROJECT_ROOT}/script/delete_container.sh"
+RAW_DELETE_SCRIPT="${PROJECT_ROOT}/legacy/script/delete_container.sh"
 MAIL_SCRIPT="${PROJECT_ROOT}/script/send_container_deleted_email.py"
 
 forward_args=("$@")
