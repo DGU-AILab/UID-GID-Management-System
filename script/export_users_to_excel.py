@@ -3,6 +3,7 @@
 
 import argparse
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -17,6 +18,38 @@ from googleapiclient.errors import HttpError
 SPREADSHEET_ID = '1U3-YidZrxNHH4mEbq6-MaxZqsUWJ6HZn2GV9flwIwPY'
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 VALID_DOMAINS = ('LAB', 'FARM')
+DOCKER_IMAGE_VERSION_COLUMN = 'docker image version'
+CUDA_VERSION_COLUMN = 'cuda version'
+
+CUDA_VERSION_BY_IMAGE_REF = {
+    'wendyunji/ascp_image:1.1': '11.8.0',
+}
+
+CUDA_VERSION_BY_TAG = {
+    '1.4.18': '11.8.0',
+    '250127': '11.8.0',
+    '250323': '11.8.0',
+    '250416': '11.8.0',
+    '250428': '11.8.0',
+    '250926': '11.8.0',
+    '251002': '12.3.0',
+    '251023': '12.3.0',
+    '260201': '12.3.0',
+    '260427': '12.3.0',
+    '260501': '12.3.0',
+    '260505': '12.3.0',
+    '260506': '12.3.0',
+    'latest': '12.3.0',
+    'krb-e2e-260621': '11.8.0',
+}
+
+CUDA_PATCH_BY_MINOR_VERSION = {
+    '11.8': '11.8.0',
+    '12.2': '12.2.2',
+    '12.3': '12.3.0',
+    '12.5': '12.5.1',
+    '12.8': '12.8.1',
+}
 
 
 def parse_args():
@@ -26,6 +59,11 @@ def parse_args():
     parser.add_argument(
         '--domains',
         help='조회할 도메인 목록 (예: LAB,FARM). 기본값은 설정 파일의 EXPORT_DOMAINS 또는 SERVER_DOMAIN.',
+    )
+    parser.add_argument(
+        '--skip-google-sheets',
+        action='store_true',
+        help='Excel 파일만 생성하고 Google Sheets 업데이트는 생략합니다.',
     )
     return parser.parse_args()
 
@@ -92,6 +130,70 @@ def build_db_config(raw_config, domain_name):
     }
 
 
+def split_docker_image_tag(docker_image_version):
+    image_ref = str(docker_image_version or '').strip()
+    if ':' not in image_ref:
+        return image_ref, image_ref
+
+    image_name, image_tag = image_ref.rsplit(':', 1)
+    return image_name, image_tag
+
+
+def normalize_image_ref(image_ref):
+    normalized = str(image_ref or '').strip()
+    if normalized.startswith('dguailab/'):
+        return normalized[len('dguailab/'):]
+    return normalized
+
+
+def infer_cuda_version(docker_image_version):
+    image_ref = str(docker_image_version or '').strip()
+    if not image_ref:
+        return ''
+
+    image_name, image_tag = split_docker_image_tag(image_ref)
+    normalized_ref = normalize_image_ref(image_ref)
+    normalized_name = normalize_image_ref(image_name)
+    normalized_full_ref = f'{normalized_name}:{image_tag}' if image_tag else normalized_ref
+
+    if image_ref in CUDA_VERSION_BY_IMAGE_REF:
+        return CUDA_VERSION_BY_IMAGE_REF[image_ref]
+    if normalized_full_ref in CUDA_VERSION_BY_IMAGE_REF:
+        return CUDA_VERSION_BY_IMAGE_REF[normalized_full_ref]
+    if image_tag in CUDA_VERSION_BY_TAG:
+        return CUDA_VERSION_BY_TAG[image_tag]
+
+    match = re.search(r'(?:^|[:/_-])cuda(?P<cuda>\d+\.\d+(?:\.\d+)?)', image_ref)
+    if not match:
+        return ''
+
+    cuda_version = match.group('cuda')
+    if cuda_version.count('.') == 2:
+        return cuda_version
+    return CUDA_PATCH_BY_MINOR_VERSION.get(cuda_version, f'{cuda_version}.0')
+
+
+def add_cuda_version_column(columns, rows):
+    if CUDA_VERSION_COLUMN in columns:
+        return columns, rows
+
+    try:
+        image_column_index = columns.index(DOCKER_IMAGE_VERSION_COLUMN)
+    except ValueError:
+        return columns, rows
+
+    output_columns = list(columns)
+    output_columns.insert(image_column_index + 1, CUDA_VERSION_COLUMN)
+
+    output_rows = []
+    for row in rows:
+        output_row = list(row)
+        output_row.insert(image_column_index + 1, infer_cuda_version(output_row[image_column_index]))
+        output_rows.append(tuple(output_row))
+
+    return output_columns, output_rows
+
+
 def get_user_data(db_config, existing_only=True):
     try:
         connection = pymysql.connect(**db_config)
@@ -133,7 +235,7 @@ def get_user_data(db_config, existing_only=True):
         rows = cursor.fetchall()
         cursor.close()
         connection.close()
-        return columns, rows
+        return add_cuda_version_column(columns, rows)
     except pymysql.Error as exc:
         print(f'데이터베이스 오류: {exc}')
         sys.exit(1)
@@ -314,21 +416,24 @@ def main():
     workbook.save(filename)
     print(f'✓ 엑셀 파일이 성공적으로 생성되었습니다: {filename}')
 
-    print('\nGoogle Sheets 업데이트 중...')
-    credentials_path = resolve_google_client_credentials_path(project_root)
-    if os.path.exists(credentials_path):
-        service = get_google_sheets_service(credentials_path)
-        if service:
-            for domain in domains:
-                db_config = build_db_config(raw_config, domain)
-                active_columns, active_data = get_user_data(db_config, existing_only=True)
-                deleted_columns, deleted_data = get_user_data(db_config, existing_only=False)
-                update_google_sheet(service, active_columns, active_data, sheet_name=domain)
-                update_google_sheet(service, deleted_columns, deleted_data, sheet_name=f'{domain}(deleted)')
-        else:
-            print('⚠ Google Sheets 서비스 연결 실패')
+    if args.skip_google_sheets:
+        print('\nGoogle Sheets 업데이트 생략 (--skip-google-sheets)')
     else:
-        print(f'⚠ 인증 파일을 찾을 수 없습니다: {credentials_path}')
+        print('\nGoogle Sheets 업데이트 중...')
+        credentials_path = resolve_google_client_credentials_path(project_root)
+        if os.path.exists(credentials_path):
+            service = get_google_sheets_service(credentials_path)
+            if service:
+                for domain in domains:
+                    db_config = build_db_config(raw_config, domain)
+                    active_columns, active_data = get_user_data(db_config, existing_only=True)
+                    deleted_columns, deleted_data = get_user_data(db_config, existing_only=False)
+                    update_google_sheet(service, active_columns, active_data, sheet_name=domain)
+                    update_google_sheet(service, deleted_columns, deleted_data, sheet_name=f'{domain}(deleted)')
+            else:
+                print('⚠ Google Sheets 서비스 연결 실패')
+        else:
+            print(f'⚠ 인증 파일을 찾을 수 없습니다: {credentials_path}')
 
     print('\n' + '=' * 60)
     print('작업 완료!')

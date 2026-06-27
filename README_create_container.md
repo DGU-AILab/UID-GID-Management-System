@@ -1,4 +1,9 @@
-# create_container.sh Notes
+# Legacy create_container.sh Notes
+
+The primary implementation on this branch lives under `script/` as the Python
+`uidctl` CLI. This file records legacy shell behavior that is still kept under
+`legacy/script/` for rollback, comparison, and operations that have not yet
+fully moved to Python.
 
 ## LAB Storage Root Squash Provisioning
 
@@ -7,7 +12,7 @@ storage server.
 
 If LAB storage enables root_squash, a container root process cannot create a
 new user's home directory on the NFS export. For that case,
-`script/create_container.sh` prepares the directory on the storage server
+`legacy/script/create_container.sh` prepares the directory on the storage server
 before creating the Docker container or DB rows.
 
 The LAB flow uses raw Ansible SSH to run:
@@ -52,7 +57,7 @@ realm:        LAB.DECS.INTERNAL
 NFS mode:     NFSv4.1 sec=krb5p root_squash
 ```
 
-`script/create_container.sh --domain LAB --enable-kerberos true` performs the
+`legacy/script/create_container.sh --domain LAB --enable-kerberos true` performs the
 following before Docker/DB finalization:
 
 1. Creates or reuses the Unix user/group on LAB storage with the DB UID/GID.
@@ -99,8 +104,8 @@ old identity/GSS cache entries for a short time. In that state, the NAS may
 already show the user with `id FARM\\<username>`, but NFSv4.1 `sec=krb5p`
 write can still fail with `Permission denied`.
 
-For this reason, `script/create_container.sh` calls helper code in
-`script/common_domain_db.sh` to refresh the NAS-side Kerberos NFS state before
+For this reason, `legacy/script/create_container.sh` calls helper code in
+`legacy/script/common_domain_db.sh` to refresh the NAS-side Kerberos NFS state before
 the Docker container and DB rows are finalized.
 
 The refresh does the following through NAS SSH:
@@ -132,11 +137,15 @@ restarted.
 The create flow then performs a real NFS write check on the target FARM host:
 
 ```bash
-setpriv --reuid=<uid> --regid=<runtime_gid> --clear-groups \
+setpriv --reuid=<uid> --regid=<gid> --clear-groups \
   env KRB5CCNAME=FILE:/run/user/<uid>/krb5cc \
   sh -c 'printf access-check > "$1" && rm -f "$1"' _ \
-  /mnt/nas-krb-test-v4/user-share/<username>/.decs_kerberos_access_check
+/mnt/nas-krb-test-v4/user-share/<username>/.decs_kerberos_access_check
 ```
+
+Before the write check, the create flow also verifies that the target FARM host
+sees the NFS home owner UID as the same DB/container UID. If the home is still
+`nobody` or a different idmap UID, creation is aborted before DB writes.
 
 If the first write check fails, `create_container.sh` refreshes the NAS
 GSS/RPC caches one more time and retries. If the second write check also fails,
@@ -198,8 +207,8 @@ Expected permissions:
 ```text
 /etc/decs-krb/keytabs/<username>.keytab    root:root 0400
 /etc/decs-krb/refresh.d/<username>.env     root:root 0600
-/run/user/<uid>/                           <uid>:<runtime_gid> 0700
-/run/user/<uid>/krb5cc                     <uid>:<runtime_gid> 0600
+/run/user/<uid>/                           <uid>:<gid> 0700
+/run/user/<uid>/krb5cc                     <uid>:<gid> 0600
 ```
 
 The DB should only keep non-secret metadata if needed, such as:
@@ -235,7 +244,7 @@ Security notes:
 Rotation:
 
 ```bash
-bash script/create_container.sh \
+bash legacy/script/create_container.sh \
   --enable-kerberos true \
   --rotate-kerberos-keytab true \
   ...
@@ -244,3 +253,23 @@ bash script/create_container.sh \
 Rotation resets the AD user password and exports a fresh keytab. Existing
 tickets can remain valid until their normal lifetime expires, so incident
 response should consider ticket lifetime and renewable lifetime as well.
+
+## DB Record Skip Mode
+
+Both the Python `uidctl create-container` flow and the legacy shell
+`legacy/script/create_container.sh` support:
+
+```bash
+--no-db-record
+```
+
+This mode still reads the DB for existing UID/GID reuse and port planning, then
+creates the remote Docker container without inserting or updating `user`,
+`group`, `used_ids`, `used_ports`, or `docker_container` rows.
+
+Because no DB state is written, the flow skips DB backup and Excel/Google
+Sheets export refresh. It is intended for short-lived tests where a container
+must be created without appearing in the UID DB.
+
+The create notification email is still sent in this mode so the test user can
+receive SSH/Jupyter/VNC connection details.
