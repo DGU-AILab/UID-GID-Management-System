@@ -161,6 +161,7 @@ class ContainerCreateService:
             plan.set_fact(key, value)
         if request.enable_kerberos and kerberos_paths:
             plan.set_fact("ad_username", ad_username)
+            plan.set_fact("ad_private_group", f"{ad_username}_gid")
             plan.set_fact("kerberos_principal", kerberos_paths.principal)
             plan.set_fact("ad_unix_uid", ad_uid)
             plan.set_fact("ad_unix_gid", ad_gid)
@@ -320,6 +321,10 @@ class ContainerCreateService:
 
         paths: KerberosPaths = ctx["kerberos_paths"]
         ad_identity_host = ctx["target_host"] if self.config.is_farm_kerberos_ad_dc_host(ctx["target_host"]) else self.config.farm_kerberos_ad_dc_host
+        private_group = f"{ctx['ad_username']}_gid"
+        self.remote.shell(self.config.farm_kerberos_ad_dc_host, build_ad_group_command(self.config, private_group, ctx["ad_uid"]))
+        if ad_identity_host != self.config.farm_kerberos_ad_dc_host:
+            self.remote.shell(ad_identity_host, build_ad_pull_command(self.config, ad_identity_host, self.config.farm_kerberos_ad_dc_host))
         if ctx["ad_group_required"]:
             self.remote.shell(self.config.farm_kerberos_ad_dc_host, build_ad_group_command(self.config, ctx["ad_groupname"], ctx["gid"]))
             if ad_identity_host != self.config.farm_kerberos_ad_dc_host:
