@@ -65,6 +65,17 @@ class AppConfig:
     lab_storage_user_share_root: str
     lab_storage_sudo: str
     lab_host_user_share_root_template: str
+    lab_kerberos_realm: str
+    lab_kerberos_ad_netbios: str
+    lab_kerberos_nis_domain: str
+    lab_kerberos_ad_dc_host: str
+    lab_kerberos_storage_user_share_root: str
+    lab_kerberos_mount_user_share_root_template: str
+    lab_kerberos_ccache_base: str
+    lab_kerberos_krb5_conf: str
+    lab_kerberos_keytab_dir: str
+    lab_kerberos_refresh_env_dir: str
+    lab_kerberos_refresh_interval: str
     farm_nas_host: str
     farm_nas_port: int
     farm_nas_user: str
@@ -105,6 +116,14 @@ class AppConfig:
         ad_dc_hosts = split_csv(_get(values, "FARM_KERBEROS_AD_DC_HOSTS", _get(values, "FARM_KERBEROS_AD_DC_HOST", "farm2")))
         if not ad_dc_hosts:
             ad_dc_hosts = ["farm2"]
+        lab_storage_user_share_root = _get(values, "LAB_STORAGE_USER_SHARE_ROOT", "/294t/dcloud/share/user-share")
+        lab_host_user_share_root_template = _get(values, "LAB_HOST_USER_SHARE_ROOT_TEMPLATE", "/home/tako{server_number}/share/user-share")
+        lab_kerberos_storage_user_share_root = _get(values, "LAB_KERBEROS_STORAGE_USER_SHARE_ROOT", lab_storage_user_share_root)
+        lab_kerberos_mount_user_share_root_template = _get(
+            values,
+            "LAB_KERBEROS_MOUNT_USER_SHARE_ROOT_TEMPLATE",
+            _get(values, "LAB_KERBEROS_MOUNT_USER_SHARE_ROOT", lab_host_user_share_root_template),
+        )
         return cls(
             db_port=_get_int(values, "DB_PORT", 3307),
             db_name=_get(values, "DB_NAME", "nfs_db"),
@@ -122,9 +141,20 @@ class AppConfig:
             lab_storage_user=_get(values, "LAB_STORAGE_USER", "jy"),
             lab_storage_ssh_key=_get(values, "LAB_STORAGE_SSH_KEY", ""),
             lab_storage_ssh_common_args=_get(values, "LAB_STORAGE_SSH_COMMON_ARGS", ""),
-            lab_storage_user_share_root=_get(values, "LAB_STORAGE_USER_SHARE_ROOT", "/294t/dcloud/share/user-share"),
+            lab_storage_user_share_root=lab_storage_user_share_root,
             lab_storage_sudo=_get(values, "LAB_STORAGE_SUDO", "sudo -n"),
-            lab_host_user_share_root_template=_get(values, "LAB_HOST_USER_SHARE_ROOT_TEMPLATE", "/home/tako{server_number}/share/user-share"),
+            lab_host_user_share_root_template=lab_host_user_share_root_template,
+            lab_kerberos_realm=_get(values, "LAB_KERBEROS_REALM", "LAB.DECS.INTERNAL"),
+            lab_kerberos_ad_netbios=_get(values, "LAB_KERBEROS_AD_NETBIOS", "LAB"),
+            lab_kerberos_nis_domain=_get(values, "LAB_KERBEROS_NIS_DOMAIN", "lab"),
+            lab_kerberos_ad_dc_host=_get(values, "LAB_KERBEROS_AD_DC_HOST", "lab2"),
+            lab_kerberos_storage_user_share_root=lab_kerberos_storage_user_share_root,
+            lab_kerberos_mount_user_share_root_template=lab_kerberos_mount_user_share_root_template,
+            lab_kerberos_ccache_base=_get(values, "LAB_KERBEROS_CCACHE_BASE", "/run/user"),
+            lab_kerberos_krb5_conf=_get(values, "LAB_KERBEROS_KRB5_CONF", "/etc/krb5.conf"),
+            lab_kerberos_keytab_dir=_get(values, "LAB_KERBEROS_KEYTAB_DIR", "/etc/decs-krb/keytabs"),
+            lab_kerberos_refresh_env_dir=_get(values, "LAB_KERBEROS_REFRESH_ENV_DIR", "/etc/decs-krb/refresh.d"),
+            lab_kerberos_refresh_interval=_get(values, "LAB_KERBEROS_REFRESH_INTERVAL", _get(values, "FARM_KERBEROS_REFRESH_INTERVAL", "1h")),
             farm_nas_host=_get(values, "FARM_NAS_HOST", "192.168.2.30"),
             farm_nas_port=_get_int(values, "FARM_NAS_PORT", 6954),
             farm_nas_user=_get(values, "FARM_NAS_USER", "jy"),
@@ -136,12 +166,12 @@ class AppConfig:
             farm_kerberos_nis_domain=_get(values, "FARM_KERBEROS_NIS_DOMAIN", "farm"),
             farm_kerberos_ad_dc_host=ad_dc_hosts[0],
             farm_kerberos_ad_dc_hosts=tuple(ad_dc_hosts),
-            farm_kerberos_nas_user_share_root=_get(values, "FARM_KERBEROS_NAS_USER_SHARE_ROOT", "/volume1/test_krb/user-share"),
+            farm_kerberos_nas_user_share_root=_get(values, "FARM_KERBEROS_NAS_USER_SHARE_ROOT", "/volume1/share/user-share"),
             farm_kerberos_nas_restart_gss_services=parse_bool(_get(values, "FARM_KERBEROS_NAS_RESTART_GSS_SERVICES", "true")),
             farm_kerberos_nas_svcgssd=_get(values, "FARM_KERBEROS_NAS_SVCGSSD", "/usr/sbin/svcgssd"),
             farm_kerberos_nas_idmapd=_get(values, "FARM_KERBEROS_NAS_IDMAPD", "/usr/sbin/idmapd"),
             farm_kerberos_nas_nfs_principal=_get(values, "FARM_KERBEROS_NAS_NFS_PRINCIPAL", "nfs/nas.farm.decs.internal@FARM.DECS.INTERNAL"),
-            farm_kerberos_mount_user_share_root=_get(values, "FARM_KERBEROS_MOUNT_USER_SHARE_ROOT", "/mnt/nas-krb-test-v4/user-share"),
+            farm_kerberos_mount_user_share_root=_get(values, "FARM_KERBEROS_MOUNT_USER_SHARE_ROOT", "/home/tako{server_number}/share/user-share"),
             farm_kerberos_ccache_base=_get(values, "FARM_KERBEROS_CCACHE_BASE", "/run/user"),
             farm_kerberos_krb5_conf=_get(values, "FARM_KERBEROS_KRB5_CONF", "/etc/krb5.conf"),
             farm_kerberos_keytab_dir=_get(values, "FARM_KERBEROS_KEYTAB_DIR", "/etc/decs-krb/keytabs"),
@@ -182,8 +212,28 @@ class AppConfig:
             return host
         return f"{host}.{domain}"
 
+    def lab_kerberos_domain_fqdn(self) -> str:
+        return self.lab_kerberos_realm.lower()
+
+    def lab_kerberos_domain_dn(self) -> str:
+        return ",".join(f"DC={part}" for part in self.lab_kerberos_domain_fqdn().split("."))
+
+    def lab_kerberos_ad_dc_fqdn(self, host: str) -> str:
+        domain = self.lab_kerberos_domain_fqdn()
+        if host == self.lab_kerberos_ad_dc_host and host == "lab2":
+            return f"dc1.{domain}"
+        if "." in host:
+            return host
+        return f"{host}.{domain}"
+
     def lab_host_user_share_root(self, server_number: int) -> str:
         return self.lab_host_user_share_root_template.replace("{server_number}", str(validate_server_number(server_number))).rstrip("/")
+
+    def lab_kerberos_mount_user_share_root(self, server_number: int) -> str:
+        return self.lab_kerberos_mount_user_share_root_template.replace("{server_number}", str(validate_server_number(server_number))).rstrip("/")
+
+    def farm_kerberos_mount_user_share_root_for_server(self, server_number: int) -> str:
+        return self.farm_kerberos_mount_user_share_root.replace("{server_number}", str(validate_server_number(server_number))).rstrip("/")
 
     def domains(self, raw: Optional[str] = None) -> Iterable[str]:
         value = raw or self.export_domains

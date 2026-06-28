@@ -57,28 +57,34 @@ realm:        LAB.DECS.INTERNAL
 NFS mode:     NFSv4.1 sec=krb5p root_squash
 ```
 
-`legacy/script/create_container.sh --domain LAB --enable-kerberos true` performs the
-following before Docker/DB finalization:
+`uidctl create-container --domain LAB --enable-kerberos` performs the following
+before Docker/DB finalization:
 
-1. Creates or reuses the Unix user/group on LAB storage with the DB UID/GID.
-2. Creates or reuses the MIT Kerberos principal `<username>@LAB.DECS.INTERNAL`.
-3. Exports a user keytab on LAB storage, then installs a root-only copy on the
-   target LAB host.
-4. Installs the same host ticket refresh service used by FARM, writing the
+1. Creates or reuses the Samba AD user/group on the LAB AD DC with the DB
+   UID/GID stored as RFC2307 attributes.
+2. Exports a user keytab on the LAB AD DC, then installs a root-only copy on
+   the target LAB host.
+3. Creates or repairs the LAB storage home through storage SSH and sets the
+   owner to the selected UID/GID.
+4. Verifies that the target LAB host resolves the AD user/group through NSS and
+   refreshes NFSv4 idmap/RPC caches.
+5. Installs the same host ticket refresh service used by FARM, writing the
    ccache at `/run/user/<uid>/krb5cc`.
-5. Runs a real NFS write check through the LAB host mount before creating the
+6. Runs a real NFS write check through the LAB host mount before creating the
    Docker container or DB rows.
 
 Related settings:
 
 ```text
 LAB_KERBEROS_REALM=LAB.DECS.INTERNAL
+LAB_KERBEROS_AD_NETBIOS=LAB
+LAB_KERBEROS_NIS_DOMAIN=lab
+LAB_KERBEROS_AD_DC_HOST=lab2
 LAB_KERBEROS_STORAGE_USER_SHARE_ROOT=/294t/share/test-krb/user-share
 LAB_KERBEROS_MOUNT_USER_SHARE_ROOT=/mnt/decs-lab-test-krb/user-share
 LAB_KERBEROS_CCACHE_BASE=/run/user
 LAB_KERBEROS_KRB5_CONF=/etc/krb5.conf
 LAB_KERBEROS_KEYTAB_DIR=/etc/decs-krb/keytabs
-LAB_KERBEROS_STORAGE_KEYTAB_DIR=/root/decs-lab-test-krb/keytabs
 LAB_KERBEROS_REFRESH_ENV_DIR=/etc/decs-krb/refresh.d
 ```
 
@@ -101,12 +107,12 @@ impact on existing LAB NFS clients.
 FARM Kerberos mode is not only a Docker container creation flow. When a new
 Kerberos user or AD group is created, Synology NAS and the NFS kernel can keep
 old identity/GSS cache entries for a short time. In that state, the NAS may
-already show the user with `id FARM\\<username>`, but NFSv4.1 `sec=krb5p`
+already show the user with `id FARM\\<username>`, but NFSv4 `sec=krb5p`
 write can still fail with `Permission denied`.
 
-For this reason, `legacy/script/create_container.sh` calls helper code in
-`legacy/script/common_domain_db.sh` to refresh the NAS-side Kerberos NFS state before
-the Docker container and DB rows are finalized.
+For this reason, the Python `uidctl create-container --enable-kerberos` flow
+and the legacy shell flow refresh the NAS-side Kerberos NFS state before the
+Docker container and DB rows are finalized.
 
 The refresh does the following through NAS SSH:
 
@@ -140,8 +146,20 @@ The create flow then performs a real NFS write check on the target FARM host:
 setpriv --reuid=<uid> --regid=<gid> --clear-groups \
   env KRB5CCNAME=FILE:/run/user/<uid>/krb5cc \
   sh -c 'printf access-check > "$1" && rm -f "$1"' _ \
-/mnt/nas-krb-test-v4/user-share/<username>/.decs_kerberos_access_check
+/home/tako<server_number>/share/user-share/<username>/.decs_kerberos_access_check
 ```
+
+Current FARM hosts mount:
+
+```text
+nas.farm.decs.internal:/volume1/share -> /home/takoN/share
+options: vers=4.0,sec=krb5p,addr=100.100.100.120
+container home bind root: /home/takoN/share/user-share
+NAS home root: /volume1/share/user-share
+```
+
+`FARM_KERBEROS_MOUNT_USER_SHARE_ROOT` may use the `{server_number}` placeholder,
+for example `/home/tako{server_number}/share/user-share`.
 
 Before the write check, the create flow also verifies that the target FARM host
 sees the NFS home owner UID as the same DB/container UID. If the home is still
@@ -181,7 +199,7 @@ traversal/default group access when `setfacl` is available.
 ## Kerberos Ticket Secret Storage
 
 `create_container.sh` should not store a user's Kerberos password in the UID DB
-or inside the container. The current FARM Kerberos flow uses a host-managed
+or inside the container. The current Samba AD Kerberos flow uses a host-managed
 keytab instead.
 
 Flow:
@@ -189,7 +207,7 @@ Flow:
 1. `create_container.sh` ensures the AD user/principal exists.
 2. A random AD password may be generated or rotated on the Samba AD DC.
 3. The script exports a user keytab for the principal.
-4. The keytab is stored only on the target FARM host as a root-only file.
+4. The keytab is stored only on the target Docker host as a root-only file.
 5. A systemd refresh service runs `kinit -kt` with that keytab.
 6. The service writes a Kerberos credential cache for the container user.
 7. The container receives only the ccache bind mount and `KRB5CCNAME`.

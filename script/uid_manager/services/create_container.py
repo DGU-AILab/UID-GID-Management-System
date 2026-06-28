@@ -14,6 +14,8 @@ from ..db import Repository
 from ..errors import RemoteCommandError, ValidationError
 from ..kerberos.commands import (
     build_ad_group_command,
+    build_lab_ad_host_identity_check_command,
+    build_lab_storage_ad_home_command,
     build_ad_identity_command,
     build_ad_identity_metadata_command,
     build_ad_pull_command,
@@ -22,10 +24,13 @@ from ..kerberos.commands import (
     build_ccache_dir_command,
     build_host_identity_command,
     build_host_refresh_command,
+    build_lab_storage_idmap_refresh_command,
     build_nas_gss_refresh_command,
+    build_nas_prepare_ad_home_command,
     build_nas_lookup_group_gid_command,
     build_nas_lookup_identity_command,
     build_nas_prepare_home_command,
+    build_storage_home_stat_command,
     build_storage_prepare_home_command,
     build_nfs_access_check_command,
     build_nfs_owner_uid_check_command,
@@ -39,6 +44,8 @@ from ..ports import allocate_ports
 from ..post_actions import PostActions
 from ..runners import AnsibleRunner
 from ..validation import validate_date, validate_identity_name
+
+MANAGED_ID_MINIMUM = 10000
 
 
 def generate_password(length: int) -> str:
@@ -55,8 +62,6 @@ class ContainerCreateService:
 
     def prepare(self, request: CreateContainerRequest) -> tuple[OperationPlan, dict]:
         domain = normalize_domain(request.domain)
-        if request.enable_kerberos and domain != "FARM":
-            raise ValidationError("--enable-kerberos is currently supported only for FARM")
         if request.ad_username and not request.enable_kerberos:
             raise ValidationError("--ad-username requires --enable-kerberos")
         server_number = int(request.server_number)
@@ -93,45 +98,103 @@ class ContainerCreateService:
         else:
             ports = allocate_ports(server_number, used_ports, list(request.additional_ports), request.enable_vnc)
 
-        ad_unix_ids: set[int] = set()
-        existing_ad_identity: tuple[int, int] | None = None
-        if request.enable_kerberos and domain == "FARM":
-            existing_ad_identity = self._find_existing_ad_unix_identity(ad_username)
         existing_user = self.repo.find_user(request.username)
-        if existing_user:
-            uid = existing_user.uid
-        elif existing_ad_identity:
-            uid = existing_ad_identity[0]
-        else:
-            uid = self.repo.next_available_id()
-            if request.enable_kerberos and domain == "FARM":
-                ad_unix_ids = self._used_ad_unix_ids()
-                while uid in ad_unix_ids:
-                    uid += 1
-
         groupname = request.groupname or request.username
         validate_identity_name(groupname, "group name")
         existing_group = self.repo.find_group(groupname)
+        if request.requested_uid is not None:
+            self._validate_requested_id(request.requested_uid, "--uid")
+        if request.requested_gid is not None:
+            self._validate_requested_id(request.requested_gid, "--gid")
+        if request.requested_uid is not None:
+            user_conflict = self.repo.find_user_by_uid(request.requested_uid)
+            if user_conflict and user_conflict.username != request.username:
+                raise ValidationError(f"--uid {request.requested_uid} already belongs to user {user_conflict.username}")
+            if existing_user and existing_user.uid != request.requested_uid:
+                raise ValidationError(f"existing user {request.username} has uid {existing_user.uid}, requested {request.requested_uid}")
+        if request.requested_gid is not None:
+            group_conflict = self.repo.find_group_by_gid(request.requested_gid)
+            if group_conflict and group_conflict.name != groupname:
+                raise ValidationError(f"--gid {request.requested_gid} already belongs to group {group_conflict.name}")
+            if existing_group and existing_group.gid != request.requested_gid:
+                raise ValidationError(f"existing group {groupname} has gid {existing_group.gid}, requested {request.requested_gid}")
+        existing_storage_identity = self._find_existing_storage_home_identity(request, domain, server_number) if not existing_user else None
+        identity_source = "db" if existing_user else "new"
+
+        ad_unix_ids: set[int] = set()
+        existing_ad_identity: tuple[int, int] | None = None
+        if request.enable_kerberos:
+            existing_ad_identity = self._find_existing_ad_unix_identity(ad_username, domain)
+        if existing_user:
+            uid = existing_user.uid
+        elif request.requested_uid is not None:
+            uid = request.requested_uid
+            identity_source = "requested"
+        elif existing_ad_identity:
+            uid = existing_ad_identity[0]
+            identity_source = "ad"
+        elif existing_storage_identity:
+            uid = existing_storage_identity[0]
+            identity_source = "storage_home"
+        else:
+            uid = self.repo.next_available_id()
+            if request.enable_kerberos:
+                ad_unix_ids = self._used_ad_unix_ids(domain)
+                while uid in ad_unix_ids:
+                    uid += 1
+
         if existing_group:
             gid = existing_group.gid
+        elif request.requested_gid is not None:
+            gid = request.requested_gid
         elif groupname == request.username and existing_ad_identity:
             gid = existing_ad_identity[1]
+        elif existing_storage_identity:
+            gid = existing_storage_identity[1]
         elif groupname == request.username:
             gid = uid
         else:
             gid = self.repo.next_available_id()
-            if request.enable_kerberos and domain == "FARM":
+            if request.enable_kerberos:
                 if not ad_unix_ids:
-                    ad_unix_ids = self._used_ad_unix_ids()
+                    ad_unix_ids = self._used_ad_unix_ids(domain)
                 while gid in ad_unix_ids or gid == uid:
                     gid += 1
+        if existing_storage_identity:
+            self._validate_adopted_storage_identity(request.username, groupname, uid, gid, existing_storage_identity)
+        if request.requested_uid is not None and existing_ad_identity and existing_ad_identity[0] != request.requested_uid:
+            raise ValidationError(f"existing AD user {ad_username} has uidNumber {existing_ad_identity[0]}, requested {request.requested_uid}")
+        if request.requested_gid is not None and existing_ad_identity and existing_ad_identity[1] != request.requested_gid:
+            raise ValidationError(f"existing AD user {ad_username} has gidNumber {existing_ad_identity[1]}, requested {request.requested_gid}")
 
-        ad_group_required = bool(request.groupname and groupname != ad_username)
-        ad_groupname = groupname if ad_group_required else ad_username
+        uid_already_reserved = self.repo.is_id_reserved(uid)
+        gid_already_reserved = self.repo.is_id_reserved(gid)
+
+        private_ad_groupname = f"{ad_username}_gid"
+        ad_group_required = bool(request.groupname and groupname not in {request.username, ad_username})
+        ad_groupname = groupname if ad_group_required else private_ad_groupname
         ad_uid = uid
         ad_gid = gid
-        farm_kerberos_mount_root = f"/home/tako{server_number}/share/user-share"
-        kerberos_paths = KerberosPaths(ad_username, uid, self.config, farm_kerberos_mount_root, home_username=request.username) if request.enable_kerberos else None
+        kerberos_paths = None
+        if request.enable_kerberos and domain == "FARM":
+            farm_kerberos_mount_root = self.config.farm_kerberos_mount_user_share_root_for_server(server_number)
+            kerberos_paths = KerberosPaths(ad_username, uid, self.config, farm_kerberos_mount_root, home_username=request.username)
+        elif request.enable_kerberos and domain == "LAB":
+            lab_kerberos_mount_root = self.config.lab_kerberos_mount_user_share_root(server_number)
+            kerberos_paths = KerberosPaths(
+                ad_username,
+                uid,
+                self.config,
+                lab_kerberos_mount_root,
+                home_username=request.username,
+                realm=self.config.lab_kerberos_realm,
+                storage_home_root=self.config.lab_kerberos_storage_user_share_root,
+                ccache_base=self.config.lab_kerberos_ccache_base,
+                krb5_conf=self.config.lab_kerberos_krb5_conf,
+                keytab_dir=self.config.lab_kerberos_keytab_dir,
+                refresh_env_dir=self.config.lab_kerberos_refresh_env_dir,
+                refresh_interval=self.config.lab_kerberos_refresh_interval,
+            )
         supplemental_groups = self.repo.supplemental_groups(request.username, gid) if existing_user else []
         container_name = request.container_name or f"{request.username}_by_{request.created_by}"
         if domain == "LAB":
@@ -157,16 +220,30 @@ class ContainerCreateService:
             "container_name": container_name,
             "kerberos": request.enable_kerberos,
             "db_record": not request.no_db_record,
+            "identity_source": identity_source,
         }.items():
             plan.set_fact(key, value)
+        if request.requested_uid is not None:
+            plan.set_fact("requested_uid", request.requested_uid)
+        if request.requested_gid is not None:
+            plan.set_fact("requested_gid", request.requested_gid)
+        if existing_storage_identity:
+            plan.set_fact("adopted_storage_home", existing_storage_identity[2])
         if request.enable_kerberos and kerberos_paths:
             plan.set_fact("ad_username", ad_username)
-            plan.set_fact("ad_private_group", f"{ad_username}_gid")
+            plan.set_fact("ad_private_group", private_ad_groupname)
+            plan.set_fact("ad_primary_group", ad_groupname)
             plan.set_fact("kerberos_principal", kerberos_paths.principal)
+            plan.set_fact("kerberos_realm", kerberos_paths.realm_name)
             plan.set_fact("ad_unix_uid", ad_uid)
             plan.set_fact("ad_unix_gid", ad_gid)
+            if domain == "LAB":
+                plan.set_fact("kerberos_storage_home", kerberos_paths.storage_home)
         plan.add_step("ensure Docker image exists on target host")
-        if domain == "LAB":
+        if domain == "LAB" and request.enable_kerberos:
+            plan.add_step("ensure LAB Samba AD user/group, export root-only keytab, and prepare Kerberos storage home")
+            plan.add_step("verify LAB AD NSS/idmap, ccache refresh timer, and Kerberized NFS write access")
+        elif domain == "LAB":
             plan.add_step("prepare LAB storage home for root_squash-safe UID/GID ownership")
         if domain == "FARM" and request.enable_kerberos:
             plan.add_step("ensure Samba AD user/group, export root-only keytab, create host ccache refresh timer")
@@ -216,6 +293,9 @@ class ContainerCreateService:
             "ad_gid": ad_gid,
             "existing_user": existing_user,
             "existing_group": existing_group,
+            "identity_source": identity_source,
+            "uid_already_reserved": uid_already_reserved,
+            "gid_already_reserved": gid_already_reserved,
             "container_name": container_name,
             "ports": ports,
             "docker_command": docker_command,
@@ -268,9 +348,9 @@ class ContainerCreateService:
             self.remote.shell(ctx["target_host"], f"docker inspect '{ctx['container_name']}' >/dev/null 2>&1 && docker port '{ctx['container_name']}' >/dev/null")
             if not request.no_db_record:
                 self.repo.begin()
-                if not ctx["existing_user"]:
+                if not ctx["existing_user"] and not ctx["uid_already_reserved"]:
                     self.repo.reserve_id(ctx["uid"])
-                if not ctx["existing_group"] and ctx["gid"] != ctx["uid"]:
+                if not ctx["existing_group"] and ctx["gid"] != ctx["uid"] and not ctx["gid_already_reserved"]:
                     self.repo.reserve_id(ctx["gid"])
                 if not ctx["existing_group"]:
                     self.repo.insert_group(ctx["groupname"], ctx["gid"])
@@ -296,6 +376,9 @@ class ContainerCreateService:
 
     def _prepare_storage_and_kerberos(self, request: CreateContainerRequest, ctx: dict) -> None:
         if ctx["domain"] == "LAB":
+            if request.enable_kerberos:
+                self._prepare_lab_kerberos(request, ctx)
+                return
             home = storage_plain_home(self.config.lab_storage_user_share_root, request.username)
             self.remote.raw(
                 self.config.lab_storage_host,
@@ -363,9 +446,10 @@ class ContainerCreateService:
         ctx["runtime_gid"] = ctx["gid"]
         ctx["runtime_supplemental_groups"] = ctx["supplemental_groups"]
         self.remote.shell(ctx["target_host"], build_host_identity_command(self.config, request.username, ctx["uid"], ctx["groupname"], ctx["gid"]))
+        nas_owner_group = ctx["ad_groupname"] if ctx["ad_group_required"] else private_group
         self.remote.raw(
             self.config.farm_nas_host,
-            build_nas_prepare_home_command(paths.nas_home, nas_uid, nas_gid, self.config.farm_nas_sudo),
+            build_nas_prepare_ad_home_command(self.config, paths.nas_home, ctx["ad_username"], nas_owner_group),
             user=self.config.farm_nas_user,
             port=self.config.farm_nas_port,
             private_key=self.config.farm_nas_ssh_key,
@@ -380,9 +464,9 @@ class ContainerCreateService:
             )
         self.remote.shell(ctx["target_host"], build_ccache_dir_command(self.config, paths, ctx["gid"]))
         self.remote.shell(ctx["target_host"], build_host_refresh_command(self.config, ctx["ad_username"], ctx["uid"], ctx["gid"], paths))
-        self.remote.shell(ctx["target_host"], build_nfs_owner_uid_check_command(self.config, ctx["uid"], paths))
+        self.remote.shell(ctx["target_host"], build_nfs_owner_uid_check_command(self.config, ctx["uid"], ctx["gid"], paths))
         nfs_uid, nfs_gid = self._parse_two_ints(
-            self.remote.shell(ctx["target_host"], build_nfs_owner_stat_command(self.config, paths)).stdout,
+            self.remote.shell(ctx["target_host"], build_nfs_owner_stat_command(self.config, ctx["uid"], ctx["gid"], paths)).stdout,
             "FARM NFS owner identity",
         )
         ctx["last_seen_nfs_uid"] = nfs_uid
@@ -399,10 +483,83 @@ class ContainerCreateService:
                     port=self.config.farm_nas_port,
                     private_key=self.config.farm_nas_ssh_key,
             )
-            self.remote.shell(ctx["target_host"], build_nfs_owner_uid_check_command(self.config, ctx["uid"], paths))
+            self.remote.shell(ctx["target_host"], build_nfs_owner_uid_check_command(self.config, ctx["uid"], ctx["gid"], paths))
             nfs_uid, nfs_gid = self._parse_two_ints(
-                self.remote.shell(ctx["target_host"], build_nfs_owner_stat_command(self.config, paths)).stdout,
+                self.remote.shell(ctx["target_host"], build_nfs_owner_stat_command(self.config, ctx["uid"], ctx["gid"], paths)).stdout,
                 "FARM NFS owner identity",
+            )
+            ctx["last_seen_nfs_uid"] = nfs_uid
+            ctx["last_seen_nfs_gid"] = nfs_gid
+            ctx["kerberos_identity_record"] = self._with_last_seen_identity(ctx["kerberos_identity_record"], ctx)
+            self.remote.shell(ctx["target_host"], build_nfs_access_check_command(self.config, request.username, ctx["uid"], ctx["gid"], paths))
+
+    def _prepare_lab_kerberos(self, request: CreateContainerRequest, ctx: dict) -> None:
+        paths: KerberosPaths = ctx["kerberos_paths"]
+        ad_identity_host = self.config.lab_kerberos_ad_dc_host
+        private_group = f"{ctx['ad_username']}_gid"
+        self.remote.shell(ad_identity_host, build_ad_group_command(self.config, private_group, ctx["ad_uid"], domain="LAB"))
+        if ctx["ad_group_required"]:
+            self.remote.shell(ad_identity_host, build_ad_group_command(self.config, ctx["ad_groupname"], ctx["gid"], domain="LAB"))
+        self.remote.shell(
+            ad_identity_host,
+            build_ad_identity_command(
+                self.config,
+                ctx["ad_username"],
+                ctx["ad_uid"],
+                ctx["ad_groupname"],
+                ctx["ad_gid"],
+                paths,
+                request.rotate_kerberos_keytab,
+                domain="LAB",
+            ),
+        )
+        ad_metadata = self._parse_key_values(
+            self.remote.shell(ad_identity_host, build_ad_identity_metadata_command(self.config, ctx["ad_username"], domain="LAB")).stdout,
+            "LAB AD Kerberos identity metadata",
+        )
+        kerberos_identity = self._build_kerberos_identity_record(request, ctx, ad_metadata)
+        self._validate_kerberos_identity(request.username, kerberos_identity)
+        ctx["kerberos_identity_record"] = kerberos_identity
+        if ctx["target_host"] != ad_identity_host:
+            self._copy_keytab_to_target(ad_identity_host, ctx["target_host"], paths)
+        self.remote.raw(
+            self.config.lab_storage_host,
+            build_lab_storage_ad_home_command(self.config, paths.storage_home, ctx["ad_username"], ctx["uid"], ctx["ad_groupname"], ctx["gid"]),
+            user=self.config.lab_storage_user,
+            port=self.config.lab_storage_port,
+            private_key=self.config.lab_storage_ssh_key,
+            ssh_common_args=self.config.lab_storage_ssh_common_args,
+        )
+        self.remote.shell(ctx["target_host"], build_lab_ad_host_identity_check_command(self.config, ctx["ad_username"], ctx["uid"], ctx["ad_groupname"], ctx["gid"]))
+        ctx["runtime_gid"] = ctx["gid"]
+        ctx["runtime_supplemental_groups"] = ctx["supplemental_groups"]
+        self.remote.shell(ctx["target_host"], build_ccache_dir_command(self.config, paths, ctx["gid"]))
+        self.remote.shell(ctx["target_host"], build_host_refresh_command(self.config, ctx["ad_username"], ctx["uid"], ctx["gid"], paths))
+        self.remote.shell(ctx["target_host"], build_nfs_owner_uid_check_command(self.config, ctx["uid"], ctx["gid"], paths))
+        nfs_uid, nfs_gid = self._parse_two_ints(
+            self.remote.shell(ctx["target_host"], build_nfs_owner_stat_command(self.config, ctx["uid"], ctx["gid"], paths)).stdout,
+            "LAB NFS owner identity",
+        )
+        ctx["last_seen_nfs_uid"] = nfs_uid
+        ctx["last_seen_nfs_gid"] = nfs_gid
+        ctx["kerberos_identity_record"] = self._with_last_seen_identity(ctx["kerberos_identity_record"], ctx)
+        try:
+            self.remote.shell(ctx["target_host"], build_nfs_access_check_command(self.config, request.username, ctx["uid"], ctx["gid"], paths))
+        except RemoteCommandError:
+            self.remote.raw(
+                self.config.lab_storage_host,
+                build_lab_storage_idmap_refresh_command(self.config),
+                user=self.config.lab_storage_user,
+                port=self.config.lab_storage_port,
+                private_key=self.config.lab_storage_ssh_key,
+                ssh_common_args=self.config.lab_storage_ssh_common_args,
+                check=False,
+            )
+            self.remote.shell(ctx["target_host"], build_lab_ad_host_identity_check_command(self.config, ctx["ad_username"], ctx["uid"], ctx["ad_groupname"], ctx["gid"]))
+            self.remote.shell(ctx["target_host"], build_nfs_owner_uid_check_command(self.config, ctx["uid"], ctx["gid"], paths))
+            nfs_uid, nfs_gid = self._parse_two_ints(
+                self.remote.shell(ctx["target_host"], build_nfs_owner_stat_command(self.config, ctx["uid"], ctx["gid"], paths)).stdout,
+                "LAB NFS owner identity",
             )
             ctx["last_seen_nfs_uid"] = nfs_uid
             ctx["last_seen_nfs_gid"] = nfs_gid
@@ -426,7 +583,7 @@ class ContainerCreateService:
             ])
             self.remote.shell(
                 target_host,
-                f"{self.config.kerberos_remote_sudo} install -d -o root -g root -m 0700 {self.config.farm_kerberos_keytab_dir}",
+                f"{self.config.kerberos_remote_sudo} install -d -o root -g root -m 0700 {paths.keytab_dir or self.config.farm_kerberos_keytab_dir}",
             )
             self.remote.local_runner.run([
                 "ansible",
@@ -442,8 +599,12 @@ class ContainerCreateService:
         finally:
             shutil.rmtree(scratch_dir, ignore_errors=True)
 
-    def _used_ad_unix_ids(self) -> set[int]:
-        result = self.remote.shell(self.config.farm_kerberos_ad_dc_host, build_ad_unix_ids_command(self.config))
+    def _ad_identity_host_for_domain(self, domain: str) -> str:
+        normalized = normalize_domain(domain)
+        return self.config.lab_kerberos_ad_dc_host if normalized == "LAB" else self.config.farm_kerberos_ad_dc_host
+
+    def _used_ad_unix_ids(self, domain: str = "FARM") -> set[int]:
+        result = self.remote.shell(self._ad_identity_host_for_domain(domain), build_ad_unix_ids_command(self.config))
         ids: set[int] = set()
         for line in result.stdout.splitlines():
             parts = line.strip().split()
@@ -451,10 +612,10 @@ class ContainerCreateService:
                 ids.add(int(parts[1]))
         return ids
 
-    def _find_existing_ad_unix_identity(self, ad_username: str) -> tuple[int, int] | None:
+    def _find_existing_ad_unix_identity(self, ad_username: str, domain: str = "FARM") -> tuple[int, int] | None:
         result = self.remote.shell(
-            self.config.farm_kerberos_ad_dc_host,
-            build_existing_ad_identity_metadata_command(self.config, ad_username),
+            self._ad_identity_host_for_domain(domain),
+            build_existing_ad_identity_metadata_command(self.config, ad_username, domain=domain),
             check=False,
         )
         values: dict[str, str] = {}
@@ -471,6 +632,47 @@ class ContainerCreateService:
         if uid and gid and uid.isdigit() and gid.isdigit():
             return int(uid), int(gid)
         return None
+
+    def _find_existing_storage_home_identity(self, request: CreateContainerRequest, domain: str, server_number: int) -> tuple[int, int, str] | None:
+        if domain != "LAB":
+            return None
+        root = self.config.lab_kerberos_storage_user_share_root if request.enable_kerberos else self.config.lab_storage_user_share_root
+        home = storage_plain_home(root, request.username)
+        result = self.remote.raw(
+            self.config.lab_storage_host,
+            build_storage_home_stat_command(home, self.config.lab_storage_sudo),
+            user=self.config.lab_storage_user,
+            port=self.config.lab_storage_port,
+            private_key=self.config.lab_storage_ssh_key,
+            ssh_common_args=self.config.lab_storage_ssh_common_args,
+        )
+        for line in result.stdout.splitlines():
+            parts = line.strip().split()
+            if parts == ["missing"]:
+                return None
+            if len(parts) == 3 and parts[0] == "present" and parts[1].isdigit() and parts[2].isdigit():
+                return int(parts[1]), int(parts[2]), home
+        raise ValidationError(f"could not parse LAB storage home identity for {home}: {result.stdout}")
+
+    def _validate_adopted_storage_identity(self, username: str, groupname: str, uid: int, gid: int, identity: tuple[int, int, str]) -> None:
+        home_uid, home_gid, home = identity
+        if uid != home_uid or gid != home_gid:
+            raise ValidationError(f"storage home identity mismatch for {home}: selected={uid}:{gid} storage={home_uid}:{home_gid}")
+        if uid < MANAGED_ID_MINIMUM or gid < MANAGED_ID_MINIMUM or uid == 65534 or gid == 65534:
+            raise ValidationError(f"refusing to adopt unmanaged storage home owner for {home}: {uid}:{gid}")
+
+        user_conflict = self.repo.find_user_by_uid(uid)
+        if user_conflict and user_conflict.username != username:
+            raise ValidationError(f"storage home uid conflict for {home}: uid {uid} already belongs to {user_conflict.username}")
+
+        group_conflict = self.repo.find_group_by_gid(gid)
+        if group_conflict and group_conflict.name != groupname:
+            raise ValidationError(f"storage home gid conflict for {home}: gid {gid} already belongs to group {group_conflict.name}")
+
+    @staticmethod
+    def _validate_requested_id(value: int, label: str) -> None:
+        if value < MANAGED_ID_MINIMUM or value == 65534:
+            raise ValidationError(f"{label} must be a managed id >= {MANAGED_ID_MINIMUM} and not 65534")
 
     def _docker_run_command(
         self,
@@ -500,13 +702,13 @@ class ContainerCreateService:
         if kerberos_paths:
             kerberos_params = (
                 f" --mount type=bind,source='{kerberos_paths.ccache_dir}',target='{kerberos_paths.ccache_dir}'"
-                f" --mount type=bind,source='{self.config.farm_kerberos_krb5_conf}',target=/etc/krb5.conf,readonly"
+                f" --mount type=bind,source='{kerberos_paths.krb5_conf_file}',target=/etc/krb5.conf,readonly"
                 f" -e KRB5CCNAME='FILE:{kerberos_paths.ccache_file}'"
                 " -e DECS_KERBEROS_ENABLED='true'"
                 " -e DECS_KERBEROS_HOST_KEYTAB='true'"
                 " -e DECS_USER_SUDO_MODE='restricted'"
                 f" -e DECS_KRB5_PRINCIPAL='{kerberos_paths.principal}'"
-                f" -e KRB5_REALM='{self.config.farm_kerberos_realm}'"
+                f" -e KRB5_REALM='{kerberos_paths.realm_name}'"
             )
         return (
             "docker run -dit --init --gpus device=all --memory=192g --memory-swap=192g "

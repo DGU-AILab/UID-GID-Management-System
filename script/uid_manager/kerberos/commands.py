@@ -18,18 +18,222 @@ def nas_plain_home(root: str, username: str) -> str:
     return storage_plain_home(root, username)
 
 
+def _home_app_dir_lines(sudo: str, *, home_var: str = "$home_dir", uid_var: str = "$uid", gid_var: str = "$gid") -> list[str]:
+    return [
+        f"for app_dir in \"{home_var}/.jupyter\" \"{home_var}/decs_jupyter_lab\" \"{home_var}/.vnc\"; do",
+        f"  {sudo}mkdir -p \"$app_dir\"",
+        f"  {sudo}chown -R \"{uid_var}:{gid_var}\" \"$app_dir\"",
+        f"  {sudo}chmod 700 \"$app_dir\"",
+        "done",
+        f"{sudo}touch \"{home_var}/.jupyter/jupyter_notebook_config.py\"",
+        f"{sudo}chown \"{uid_var}:{gid_var}\" \"{home_var}/.jupyter/jupyter_notebook_config.py\"",
+        f"{sudo}chmod 600 \"{home_var}/.jupyter/jupyter_notebook_config.py\"",
+    ]
+
+
+def build_storage_home_stat_command(home_dir: str, sudo: str) -> str:
+    prefix = f"{sudo} " if sudo else ""
+    return "\n".join([
+        "set -eu",
+        "# decs_storage_home_identity_stat",
+        f"home_dir={q(home_dir)}",
+        "if [ -d \"$home_dir\" ]; then",
+        f"  {prefix}stat -c 'present %u %g' \"$home_dir\"",
+        "else",
+        "  echo missing",
+        "fi",
+    ])
+
+
 def build_storage_prepare_home_command(home_dir: str, uid: int, gid: int, sudo: str) -> str:
     prefix = f"{sudo} " if sudo else ""
     return "\n".join([
         "set -eu",
-        f"{prefix}mkdir -p {q(home_dir)}",
-        f"{prefix}chown {q(f'{uid}:{gid}')} {q(home_dir)}",
-        f"{prefix}chmod 750 {q(home_dir)}",
+        f"home_dir={q(home_dir)}",
+        f"uid={uid}",
+        f"gid={gid}",
+        f"{prefix}mkdir -p \"$home_dir\"",
+        f"{prefix}chown \"$uid:$gid\" \"$home_dir\"",
+        f"{prefix}chmod 750 \"$home_dir\"",
+        *_home_app_dir_lines(prefix),
     ])
 
 
 def build_nas_prepare_home_command(home_dir: str, uid: int, gid: int, sudo: str) -> str:
     return build_storage_prepare_home_command(home_dir, uid, gid, sudo)
+
+
+def build_nas_prepare_ad_home_command(config: AppConfig, home_dir: str, username: str, groupname: str) -> str:
+    sudo = f"{config.farm_nas_sudo} " if config.farm_nas_sudo else ""
+    owner = f"{config.farm_kerberos_ad_netbios}\\{username}"
+    group = f"{config.farm_kerberos_ad_netbios}\\{groupname}"
+    owner_group = f"{owner}:{group}"
+    return "\n".join([
+        "set -eu",
+        "net_bin=/usr/local/packages/@appstore/SMBService/usr/bin/net",
+        f"home_dir={q(home_dir)}",
+        f"owner_group={q(owner_group)}",
+        f"{sudo}\"$net_bin\" cache flush >/dev/null 2>&1 || true",
+        f"{sudo}mkdir -p \"$home_dir\"",
+        f"{sudo}chown \"$owner_group\" \"$home_dir\"",
+        f"{sudo}chmod 750 \"$home_dir\"",
+        "for app_dir in \"$home_dir/.jupyter\" \"$home_dir/decs_jupyter_lab\" \"$home_dir/.local\" \"$home_dir/.local/share\" \"$home_dir/.local/share/jupyter\"; do",
+        "  if [ -e \"$app_dir\" ]; then",
+        f"    {sudo}chown \"$owner_group\" \"$app_dir\"",
+        "  fi",
+        "done",
+        "for app_tree in \"$home_dir/.jupyter\" \"$home_dir/decs_jupyter_lab\" \"$home_dir/.local/share/jupyter\"; do",
+        "  if [ -e \"$app_tree\" ]; then",
+        f"    {sudo}chown -R \"$owner_group\" \"$app_tree\"",
+        "  fi",
+        "done",
+        "echo kerberos_nas_ad_home_ready",
+    ])
+
+
+def _local_identity_lines(sudo: str, *, username: str = "$username", groupname: str = "$groupname", uid: str = "$uid", gid: str = "$gid") -> list[str]:
+    return [
+        "ensure_group() {",
+        f"  if entry=$(getent group {groupname} 2>/dev/null); then",
+        "    current_gid=$(printf '%s\\n' \"$entry\" | awk -F: '{ print $3; exit }')",
+        f"    [ \"$current_gid\" = {gid} ] || {{ echo \"group gid mismatch for {groupname}: expected {gid}, got $current_gid\" >&2; exit 1; }}",
+        "    return",
+        "  fi",
+        f"  if other=$(getent group {gid} 2>/dev/null); then",
+        "    other_name=$(printf '%s\\n' \"$other\" | awk -F: '{ print $1; exit }')",
+        f"    echo \"WARN gid {gid} is already used by $other_name; adding duplicate group {groupname}\" >&2",
+        f"    {sudo}groupadd -o -g {gid} {groupname}",
+        "  else",
+        f"    {sudo}groupadd -g {gid} {groupname}",
+        "  fi",
+        "}",
+        "ensure_user() {",
+        f"  if entry=$(getent passwd {username} 2>/dev/null); then",
+        "    current_uid=$(printf '%s\\n' \"$entry\" | awk -F: '{ print $3; exit }')",
+        f"    [ \"$current_uid\" = {uid} ] || {{ echo \"user uid mismatch for {username}: expected {uid}, got $current_uid\" >&2; exit 1; }}",
+        f"    {sudo}usermod -g {gid} {username} >/dev/null",
+        "    return",
+        "  fi",
+        f"  if other=$(getent passwd {uid} 2>/dev/null); then",
+        "    other_name=$(printf '%s\\n' \"$other\" | awk -F: '{ print $1; exit }')",
+        f"    echo \"WARN uid {uid} is already used by $other_name; adding duplicate user {username}\" >&2",
+        "  fi",
+        f"  {sudo}useradd -o -u {uid} -g {gid} -M -N -s /usr/sbin/nologin {username}",
+        "}",
+        "ensure_group",
+        "ensure_user",
+    ]
+
+
+def _nfs_idmap_refresh_lines(sudo: str) -> list[str]:
+    flush_paths = [
+        "/proc/net/rpc/auth.unix.gid/flush",
+        "/proc/net/rpc/nfs4.idtoname/flush",
+        "/proc/net/rpc/nfs4.nametoid/flush",
+        "/proc/net/rpc/auth.rpcsec.init/flush",
+        "/proc/net/rpc/auth.rpcsec.context/flush",
+    ]
+    flush_block = " ".join(q(path) for path in flush_paths)
+    return [
+        f"command -v nfsidmap >/dev/null 2>&1 && {sudo}nfsidmap -c >/dev/null 2>&1 || true",
+        "flush_epoch=\"$(date +%s)\"",
+        f"for cache_flush in {flush_block}; do",
+        "  if [ -e \"$cache_flush\" ]; then",
+        f"    printf '%s' \"$flush_epoch\" | {sudo}tee \"$cache_flush\" >/dev/null 2>&1 || true",
+        "  fi",
+        "done",
+    ]
+
+
+def _ad_domain(domain: str) -> str:
+    normalized = domain.strip().upper()
+    return "LAB" if normalized == "LAB" else "FARM"
+
+
+def _ad_realm(config: AppConfig, domain: str) -> str:
+    return config.lab_kerberos_realm if _ad_domain(domain) == "LAB" else config.farm_kerberos_realm
+
+
+def _ad_netbios(config: AppConfig, domain: str) -> str:
+    return config.lab_kerberos_ad_netbios if _ad_domain(domain) == "LAB" else config.farm_kerberos_ad_netbios
+
+
+def _ad_nis_domain(config: AppConfig, domain: str) -> str:
+    return config.lab_kerberos_nis_domain if _ad_domain(domain) == "LAB" else config.farm_kerberos_nis_domain
+
+
+def _ad_keytab_dir(config: AppConfig, domain: str) -> str:
+    return config.lab_kerberos_keytab_dir if _ad_domain(domain) == "LAB" else config.farm_kerberos_keytab_dir
+
+
+def _ad_domain_dn(config: AppConfig, domain: str) -> str:
+    return config.lab_kerberos_domain_dn() if _ad_domain(domain) == "LAB" else config.farm_kerberos_domain_dn()
+
+
+def _ad_dc_fqdn(config: AppConfig, domain: str, host: str) -> str:
+    return config.lab_kerberos_ad_dc_fqdn(host) if _ad_domain(domain) == "LAB" else config.farm_kerberos_ad_dc_fqdn(host)
+
+
+def build_lab_storage_ad_home_command(config: AppConfig, home_dir: str, username: str, uid: int, groupname: str, gid: int) -> str:
+    sudo = f"{config.lab_storage_sudo} " if config.lab_storage_sudo else ""
+    return "\n".join([
+        "set -eu",
+        f"username={q(username)}",
+        f"groupname={q(groupname)}",
+        f"home_dir={q(home_dir)}",
+        f"uid={uid}",
+        f"gid={gid}",
+        f"command -v sss_cache >/dev/null 2>&1 && {sudo}sss_cache -E >/dev/null 2>&1 || true",
+        "if entry=$(getent passwd \"$username\" 2>/dev/null); then",
+        "  current_uid=$(printf '%s\\n' \"$entry\" | awk -F: '{ print $3; exit }')",
+        "  [ \"$current_uid\" = \"$uid\" ] || { echo \"storage AD user uid mismatch for $username: expected $uid, got $current_uid\" >&2; exit 1; }",
+        "else",
+        "  echo \"storage cannot resolve AD user $username\" >&2",
+        "  exit 1",
+        "fi",
+        "if entry=$(getent group \"$groupname\" 2>/dev/null); then",
+        "  current_gid=$(printf '%s\\n' \"$entry\" | awk -F: '{ print $3; exit }')",
+        "  [ \"$current_gid\" = \"$gid\" ] || { echo \"storage AD group gid mismatch for $groupname: expected $gid, got $current_gid\" >&2; exit 1; }",
+        "else",
+        "  echo \"storage cannot resolve AD group $groupname\" >&2",
+        "  exit 1",
+        "fi",
+        f"{sudo}mkdir -p \"$home_dir\"",
+        f"{sudo}chown \"$uid:$gid\" \"$home_dir\"",
+        f"{sudo}chmod 750 \"$home_dir\"",
+        *_home_app_dir_lines(sudo),
+        *_nfs_idmap_refresh_lines(sudo),
+        "echo kerberos_lab_storage_ad_home_ready",
+    ])
+
+
+def build_lab_storage_idmap_refresh_command(config: AppConfig) -> str:
+    sudo = f"{config.lab_storage_sudo} " if config.lab_storage_sudo else ""
+    return "\n".join([
+        "set -eu",
+        *_nfs_idmap_refresh_lines(sudo),
+        "echo kerberos_lab_storage_idmap_refreshed",
+    ])
+
+
+def build_lab_ad_host_identity_check_command(config: AppConfig, username: str, uid: int, groupname: str, gid: int) -> str:
+    sudo = f"{config.kerberos_remote_sudo} " if config.kerberos_remote_sudo else ""
+    return "\n".join([
+        "set -eu",
+        f"username={q(username)}",
+        f"groupname={q(groupname)}",
+        f"uid={uid}",
+        f"gid={gid}",
+        f"command -v sss_cache >/dev/null 2>&1 && {sudo}sss_cache -E >/dev/null 2>&1 || true",
+        "entry=$(getent passwd \"$username\")",
+        "current_uid=$(printf '%s\\n' \"$entry\" | awk -F: '{ print $3; exit }')",
+        "[ \"$current_uid\" = \"$uid\" ] || { echo \"host AD user uid mismatch for $username: expected $uid, got $current_uid\" >&2; exit 1; }",
+        "entry=$(getent group \"$groupname\")",
+        "current_gid=$(printf '%s\\n' \"$entry\" | awk -F: '{ print $3; exit }')",
+        "[ \"$current_gid\" = \"$gid\" ] || { echo \"host AD group gid mismatch for $groupname: expected $gid, got $current_gid\" >&2; exit 1; }",
+        *_nfs_idmap_refresh_lines(sudo),
+        "echo kerberos_lab_host_ad_identity_ready",
+    ])
 
 
 def build_nas_lookup_identity_command(config: AppConfig, username: str) -> str:
@@ -100,8 +304,10 @@ def build_nas_gss_refresh_command(config: AppConfig) -> str:
     ])
 
 
-def build_ad_identity_command(config: AppConfig, username: str, uid: int, groupname: str, gid: int, paths: KerberosPaths, rotate: bool) -> str:
+def build_ad_identity_command(config: AppConfig, username: str, uid: int, groupname: str, gid: int, paths: KerberosPaths, rotate: bool, *, domain: str = "FARM") -> str:
     sudo = f"{config.kerberos_remote_sudo} " if config.kerberos_remote_sudo else ""
+    nis_domain = _ad_nis_domain(config, domain)
+    keytab_dir = _ad_keytab_dir(config, domain)
     return "\n".join([
         "set -eu",
         f"username={q(username)}",
@@ -110,10 +316,9 @@ def build_ad_identity_command(config: AppConfig, username: str, uid: int, groupn
         f"keytab_file={q(paths.keytab_file)}",
         f"uid={uid}",
         f"gid={gid}",
-        f"nis_domain={q(config.farm_kerberos_nis_domain)}",
-        f"{sudo}install -d -o root -g root -m 0700 {q(config.farm_kerberos_keytab_dir)}",
-        "if [ \"$groupname\" != \"$username\" ]; then",
-        f"  {sudo}samba-tool group show \"$groupname\" >/dev/null 2>&1 || {sudo}samba-tool group add \"$groupname\" >/dev/null",
+        f"nis_domain={q(nis_domain)}",
+        f"{sudo}install -d -o root -g root -m 0700 {q(keytab_dir)}",
+        f"{sudo}samba-tool group show \"$groupname\" >/dev/null 2>&1 || {sudo}samba-tool group add \"$groupname\" >/dev/null",
         f"{sudo}env DECS_KRB_GROUPNAME=\"$groupname\" DECS_KRB_GROUP_GID=\"$gid\" DECS_KRB_NIS_DOMAIN=\"$nis_domain\" python3 - <<'PY'",
         "import os",
         "from samba.auth import system_session",
@@ -134,7 +339,6 @@ def build_ad_identity_command(config: AppConfig, username: str, uid: int, groupn
         "message['msSFU30Name'] = MessageElement(groupname, FLAG_MOD_REPLACE, 'msSFU30Name')",
         "samdb.modify(message)",
         "PY",
-        "fi",
         f"if ! {sudo}samba-tool user show \"$username\" >/dev/null 2>&1; then",
         "  new_password=\"Krb$(date +%y%m%d)!$(tr -dc A-Za-z0-9 </dev/urandom | head -c 24)\"",
         f"  {sudo}samba-tool user create \"$username\" \"$new_password\" >/dev/null",
@@ -171,9 +375,8 @@ def build_ad_identity_command(config: AppConfig, username: str, uid: int, groupn
         "message['msSFU30Name'] = MessageElement(username, FLAG_MOD_REPLACE, 'msSFU30Name')",
         "samdb.modify(message)",
         "PY",
-        "if [ \"$groupname\" != \"$username\" ]; then",
-        f"  {sudo}samba-tool group addmembers \"$groupname\" \"$username\" >/dev/null 2>&1 || {sudo}samba-tool group listmembers \"$groupname\" | grep -Fx \"$username\" >/dev/null",
-        "fi",
+        f"{sudo}samba-tool group addmembers \"$groupname\" \"$username\" >/dev/null 2>&1 || {sudo}samba-tool group listmembers \"$groupname\" | grep -Fx \"$username\" >/dev/null",
+        f"{sudo}samba-tool user setprimarygroup \"$username\" \"$groupname\" >/dev/null",
         "tmp_keytab=\"$(mktemp)\"",
         f"{sudo}samba-tool domain exportkeytab \"$tmp_keytab\" --principal=\"$principal\" >/dev/null",
         f"{sudo}chown root:root \"$tmp_keytab\"",
@@ -184,13 +387,15 @@ def build_ad_identity_command(config: AppConfig, username: str, uid: int, groupn
     ])
 
 
-def build_ad_identity_metadata_command(config: AppConfig, username: str) -> str:
+def build_ad_identity_metadata_command(config: AppConfig, username: str, *, domain: str = "FARM") -> str:
     sudo = f"{config.kerberos_remote_sudo} " if config.kerberos_remote_sudo else ""
+    realm = _ad_realm(config, domain)
+    netbios = _ad_netbios(config, domain)
     return "\n".join([
         "set -eu",
         f"username={q(username)}",
-        f"realm={q(config.farm_kerberos_realm)}",
-        f"netbios={q(config.farm_kerberos_ad_netbios)}",
+        f"realm={q(realm)}",
+        f"netbios={q(netbios)}",
         f"user_info=$({sudo}samba-tool user show \"$username\")",
         "field() { printf '%s\\n' \"$user_info\" | awk -F': ' -v key=\"$1\" '$1 == key { print $2; exit }'; }",
         "object_sid=$(field objectSid)",
@@ -211,7 +416,7 @@ def build_ad_identity_metadata_command(config: AppConfig, username: str) -> str:
     ])
 
 
-def build_existing_ad_identity_metadata_command(config: AppConfig, username: str) -> str:
+def build_existing_ad_identity_metadata_command(config: AppConfig, username: str, *, domain: str = "FARM") -> str:
     sudo = f"{config.kerberos_remote_sudo} " if config.kerberos_remote_sudo else ""
     return "\n".join([
         "set -eu",
@@ -220,7 +425,7 @@ def build_existing_ad_identity_metadata_command(config: AppConfig, username: str
         f"if ! {sudo}samba-tool user show \"$username\" >/dev/null 2>&1; then",
         "  exit 0",
         "fi",
-        *build_ad_identity_metadata_command(config, username).splitlines()[1:],
+        *build_ad_identity_metadata_command(config, username, domain=domain).splitlines()[1:],
     ])
 
 
@@ -243,13 +448,14 @@ def build_ad_unix_ids_command(config: AppConfig) -> str:
     ])
 
 
-def build_ad_group_command(config: AppConfig, groupname: str, gid: int) -> str:
+def build_ad_group_command(config: AppConfig, groupname: str, gid: int, *, domain: str = "FARM") -> str:
     sudo = f"{config.kerberos_remote_sudo} " if config.kerberos_remote_sudo else ""
+    nis_domain = _ad_nis_domain(config, domain)
     return "\n".join([
         "set -eu",
         f"groupname={q(groupname)}",
         f"gid={gid}",
-        f"nis_domain={q(config.farm_kerberos_nis_domain)}",
+        f"nis_domain={q(nis_domain)}",
         f"{sudo}samba-tool group show \"$groupname\" >/dev/null 2>&1 || {sudo}samba-tool group add \"$groupname\" >/dev/null",
         f"{sudo}env DECS_KRB_GROUPNAME=\"$groupname\" DECS_KRB_GROUP_GID=\"$gid\" DECS_KRB_NIS_DOMAIN=\"$nis_domain\" python3 - <<'PY'",
         "import os",
@@ -275,11 +481,11 @@ def build_ad_group_command(config: AppConfig, groupname: str, gid: int) -> str:
     ])
 
 
-def build_ad_pull_command(config: AppConfig, destination_host: str, source_host: str) -> str:
+def build_ad_pull_command(config: AppConfig, destination_host: str, source_host: str, *, domain: str = "FARM") -> str:
     sudo = f"{config.kerberos_remote_sudo} " if config.kerberos_remote_sudo else ""
-    destination_fqdn = config.farm_kerberos_ad_dc_fqdn(destination_host)
-    source_fqdn = config.farm_kerberos_ad_dc_fqdn(source_host)
-    domain_dn = config.farm_kerberos_domain_dn()
+    destination_fqdn = _ad_dc_fqdn(config, domain, destination_host)
+    source_fqdn = _ad_dc_fqdn(config, domain, source_host)
+    domain_dn = _ad_domain_dn(config, domain)
     return "\n".join([
         "set -eu",
         f"{sudo}samba-tool drs replicate {q(destination_fqdn)} {q(source_fqdn)} {q(domain_dn)} --local --full-sync -P >/dev/null",
@@ -409,7 +615,7 @@ def build_ccache_dir_command(config: AppConfig, paths: KerberosPaths, gid: int) 
 
 def build_host_refresh_command(config: AppConfig, username: str, uid: int, gid: int, paths: KerberosPaths) -> str:
     sudo = f"{config.kerberos_remote_sudo} " if config.kerberos_remote_sudo else ""
-    refresh_dir = config.farm_kerberos_refresh_env_dir.rstrip("/")
+    refresh_dir = paths.refresh_env_root.rstrip("/")
     return "\n".join([
         "set -eu",
         f"{sudo}install -d -o root -g root -m 0755 /etc/decs-krb",
@@ -420,13 +626,14 @@ def build_host_refresh_command(config: AppConfig, username: str, uid: int, gid: 
         "set -euo pipefail",
         "env_file=\"${1:?refresh env file is required}\"",
         "source \"$env_file\"",
-        "if klist -s -c \"$DECS_KRB_CCACHE\" 2>/dev/null && kinit -R -c \"$DECS_KRB_CCACHE\" >/dev/null 2>&1; then",
+        "kinit_timeout=\"${DECS_KRB_KINIT_TIMEOUT:-30}\"",
+        "if klist -s -c \"$DECS_KRB_CCACHE\" 2>/dev/null && timeout \"$kinit_timeout\" kinit -R -c \"$DECS_KRB_CCACHE\" >/dev/null 2>&1; then",
         "  :",
         "else",
         "  ccache_path=\"${DECS_KRB_CCACHE#FILE:}\"",
         "  install -d -o \"$DECS_KRB_UID\" -g \"$DECS_KRB_GID\" -m 0700 \"$DECS_KRB_CCACHE_DIR\"",
         "  install -o \"$DECS_KRB_UID\" -g \"$DECS_KRB_GID\" -m 0600 /dev/null \"$ccache_path\"",
-        "  kinit -k -t \"$DECS_KRB_KEYTAB\" -c \"$DECS_KRB_CCACHE\" \"$DECS_KRB_PRINCIPAL\"",
+        "  timeout \"$kinit_timeout\" kinit -k -t \"$DECS_KRB_KEYTAB\" -c \"$DECS_KRB_CCACHE\" \"$DECS_KRB_PRINCIPAL\"",
         "fi",
         "ccache_path=\"${DECS_KRB_CCACHE#FILE:}\"",
         "chown \"$DECS_KRB_UID:$DECS_KRB_GID\" \"$ccache_path\"",
@@ -448,6 +655,7 @@ def build_host_refresh_command(config: AppConfig, username: str, uid: int, gid: 
         "Description=Refresh DECS Kerberos credential cache for %i",
         "[Service]",
         "Type=oneshot",
+        "TimeoutStartSec=45",
         f"ExecStart=/usr/local/sbin/decs-krb-refresh {refresh_dir}/%i.env",
         "DECS_KRB_SERVICE",
         f"{sudo}tee /etc/systemd/system/decs-krb-refresh@.timer >/dev/null <<DECS_KRB_TIMER",
@@ -455,7 +663,7 @@ def build_host_refresh_command(config: AppConfig, username: str, uid: int, gid: 
         "Description=Refresh DECS Kerberos credential cache for %i",
         "[Timer]",
         "OnBootSec=2min",
-        f"OnUnitActiveSec={config.farm_kerberos_refresh_interval}",
+        f"OnUnitActiveSec={paths.refresh_interval_value}",
         "AccuracySec=5min",
         "Persistent=true",
         "[Install]",
@@ -463,7 +671,41 @@ def build_host_refresh_command(config: AppConfig, username: str, uid: int, gid: 
         "DECS_KRB_TIMER",
         f"{sudo}systemctl daemon-reload",
         f"{sudo}systemctl enable --now decs-krb-refresh@{username}.timer >/dev/null",
-        f"{sudo}systemctl start decs-krb-refresh@{username}.service",
+        f"{sudo}timeout 60 systemctl start decs-krb-refresh@{username}.service",
+    ])
+
+
+def build_host_refresh_cleanup_command(config: AppConfig, username: str, paths: KerberosPaths) -> str:
+    sudo = f"{config.kerberos_remote_sudo} " if config.kerberos_remote_sudo else ""
+    return "\n".join([
+        "set -eu",
+        f"{sudo}env "
+        f"DECS_KRB_CLEANUP_INSTANCE={q(username)} "
+        f"DECS_KRB_CLEANUP_ENV={q(paths.refresh_env_file)} "
+        f"DECS_KRB_CLEANUP_KEYTAB={q(paths.keytab_file)} "
+        f"DECS_KRB_CLEANUP_CCACHE={q('FILE:' + paths.ccache_file)} "
+        f"DECS_KRB_CLEANUP_CCACHE_DIR={q(paths.ccache_dir)} "
+        "bash <<'DECS_KRB_CLEANUP'",
+        "set -eu",
+        "instance=\"$DECS_KRB_CLEANUP_INSTANCE\"",
+        "env_file=\"$DECS_KRB_CLEANUP_ENV\"",
+        "keytab=\"$DECS_KRB_CLEANUP_KEYTAB\"",
+        "ccache=\"$DECS_KRB_CLEANUP_CCACHE\"",
+        "ccache_dir=\"$DECS_KRB_CLEANUP_CCACHE_DIR\"",
+        "if [ -f \"$env_file\" ]; then",
+        "  . \"$env_file\"",
+        "  keytab=\"${DECS_KRB_KEYTAB:-$keytab}\"",
+        "  ccache=\"${DECS_KRB_CCACHE:-$ccache}\"",
+        "  ccache_dir=\"${DECS_KRB_CCACHE_DIR:-$ccache_dir}\"",
+        "fi",
+        "ccache_path=\"${ccache#FILE:}\"",
+        "systemctl disable --now \"decs-krb-refresh@${instance}.timer\" >/dev/null 2>&1 || true",
+        "systemctl reset-failed \"decs-krb-refresh@${instance}.service\" \"decs-krb-refresh@${instance}.timer\" >/dev/null 2>&1 || true",
+        "rm -f \"$env_file\" \"$keytab\" \"$ccache_path\"",
+        "rmdir \"$ccache_dir\" >/dev/null 2>&1 || true",
+        "systemctl daemon-reload >/dev/null 2>&1 || true",
+        "echo \"kerberos_refresh_cleanup_done instance=${instance}\"",
+        "DECS_KRB_CLEANUP",
     ])
 
 
@@ -486,26 +728,28 @@ def build_nfs_access_check_command(config: AppConfig, username: str, uid: int, g
     ])
 
 
-def build_nfs_owner_uid_check_command(config: AppConfig, uid: int, paths: KerberosPaths) -> str:
+def build_nfs_owner_uid_check_command(config: AppConfig, uid: int, gid: int, paths: KerberosPaths) -> str:
     sudo = f"{config.kerberos_remote_sudo} " if config.kerberos_remote_sudo else ""
+    stat_prefix = f"{sudo}setpriv --reuid={uid} --regid={gid} --clear-groups env KRB5CCNAME={q('FILE:' + paths.ccache_file)}"
     return "\n".join([
         "set -eu",
         f"home={q(paths.host_home)}",
         f"expected_uid={uid}",
-        "actual_uid=$(" + sudo + "stat -c %u \"$home\")",
-        "actual_owner=$(" + sudo + "stat -c '%U:%G' \"$home\" 2>/dev/null || true)",
+        "actual_uid=$(" + stat_prefix + " stat -c %u \"$home\")",
+        "actual_owner=$(" + stat_prefix + " stat -c '%U:%G' \"$home\" 2>/dev/null || true)",
         "if [ \"$actual_uid\" != \"$expected_uid\" ]; then",
         "  echo \"kerberos_nfs_owner_uid_mismatch home=$home expected_uid=$expected_uid actual_uid=$actual_uid owner=$actual_owner\" >&2",
-        "  echo \"FARM host NSS/idmap must map the AD uidNumber to the same DB/container UID before creating this container.\" >&2",
+        "  echo \"Kerberos host NSS/idmap must map the NFS owner to the same DB/container UID before creating this container.\" >&2",
         "  exit 1",
         "fi",
         "echo kerberos_nfs_owner_uid_ok uid=${actual_uid} owner=${actual_owner}",
     ])
 
 
-def build_nfs_owner_stat_command(config: AppConfig, paths: KerberosPaths) -> str:
+def build_nfs_owner_stat_command(config: AppConfig, uid: int, gid: int, paths: KerberosPaths) -> str:
     sudo = f"{config.kerberos_remote_sudo} " if config.kerberos_remote_sudo else ""
+    stat_prefix = f"{sudo}setpriv --reuid={uid} --regid={gid} --clear-groups env KRB5CCNAME={q('FILE:' + paths.ccache_file)}"
     return "\n".join([
         "set -eu",
-        f"{sudo}stat -c '%u %g' {q(paths.host_home)}",
+        f"{stat_prefix} stat -c '%u %g' {q(paths.host_home)}",
     ])

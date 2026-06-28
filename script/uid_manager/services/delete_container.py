@@ -5,6 +5,8 @@ from typing import Optional
 from ..config import AppConfig, compose_ansible_host_alias, compose_server_id, normalize_domain, split_server_id
 from ..db import Repository
 from ..errors import AmbiguousMatchError, NotFoundError, ValidationError
+from ..kerberos.commands import build_host_refresh_cleanup_command
+from ..kerberos.paths import KerberosPaths
 from ..models import DeleteContainerRequest, OperationPlan
 from ..post_actions import PostActions
 from ..runners import AnsibleRunner
@@ -42,9 +44,12 @@ class ContainerDeleteService:
         plan.set_fact("container", f"{container.container_name} ({container.container_id})")
         plan.set_fact("server_id", container.server_id)
         plan.set_fact("target_host", actual_host)
+        if self._should_cleanup_kerberos(container):
+            plan.set_fact("kerberos_cleanup", "last active container for user on this host")
         plan.add_step("delete used_ports rows")
         plan.add_step("mark docker_container as deleted")
         plan.add_step("remove remote Docker container")
+        plan.add_step("remove user Kerberos refresh timer/env/keytab/ccache when no active container for this user remains on the host")
         if not request.skip_post_actions:
             plan.add_step("create DB backup and refresh exports")
         return plan, container, actual_host
@@ -60,6 +65,7 @@ class ContainerDeleteService:
             if updated != 1 and not request.force:
                 raise ValidationError("failed to mark container deleted in DB")
             self.remote.shell(target_host, f"docker rm -f '{container.container_id}' >/dev/null 2>&1 || docker rm -f '{container.container_name}' >/dev/null 2>&1")
+            self._cleanup_kerberos_if_unused(container, target_host)
             self.repo.commit()
         except Exception:
             self.repo.rollback()
@@ -79,3 +85,44 @@ class ContainerDeleteService:
             self.post_actions.backup_database(domain)
             self.post_actions.update_exports()
         return plan
+
+    def _should_cleanup_kerberos(self, container) -> bool:
+        if not self.repo.find_kerberos_identity(container.username):
+            return False
+        same_user_on_host = self.repo.find_container(server_id=container.server_id, username=container.username)
+        return not any(row.id != container.id for row in same_user_on_host)
+
+    def _cleanup_kerberos_if_unused(self, container, target_host: str) -> None:
+        identity = self.repo.find_kerberos_identity(container.username)
+        if not identity or not self._should_cleanup_kerberos(container):
+            return
+        domain, server_number = split_server_id(container.server_id)
+        paths = self._kerberos_paths_for_container(container, domain, server_number, identity)
+        self.remote.shell(target_host, build_host_refresh_cleanup_command(self.config, paths.username, paths))
+
+    def _kerberos_paths_for_container(self, container, domain: str, server_number: int, identity) -> KerberosPaths:
+        ad_username = identity.ad_username
+        realm = identity.ad_realm if identity.ad_realm else None
+        if domain == "LAB":
+            return KerberosPaths(
+                ad_username,
+                container.uid,
+                self.config,
+                self.config.lab_kerberos_mount_user_share_root(server_number),
+                home_username=container.username,
+                realm=realm or self.config.lab_kerberos_realm,
+                storage_home_root=self.config.lab_kerberos_storage_user_share_root,
+                ccache_base=self.config.lab_kerberos_ccache_base,
+                krb5_conf=self.config.lab_kerberos_krb5_conf,
+                keytab_dir=self.config.lab_kerberos_keytab_dir,
+                refresh_env_dir=self.config.lab_kerberos_refresh_env_dir,
+                refresh_interval=self.config.lab_kerberos_refresh_interval,
+            )
+        return KerberosPaths(
+            ad_username,
+            container.uid,
+            self.config,
+            self.config.farm_kerberos_mount_user_share_root_for_server(server_number),
+            home_username=container.username,
+            realm=realm or self.config.farm_kerberos_realm,
+        )

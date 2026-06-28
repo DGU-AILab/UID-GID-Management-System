@@ -88,6 +88,8 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--enable-kerberos", action="store_true")
     create.add_argument("--ad-username", help="Kerberos/AD username to use when it differs from the container username")
     create.add_argument("--rotate-kerberos-keytab", action="store_true")
+    create.add_argument("--uid", type=int, help="Explicit Ubuntu UID to assign; defaults to DB/storage/AD adoption or next available ID")
+    create.add_argument("--gid", type=int, help="Explicit Ubuntu GID to assign; defaults to DB/storage/AD adoption or selected UID for private groups")
     create.add_argument("-c", "--created-by", required=True)
     create.add_argument("--email", required=True)
     create.add_argument("--phone", required=True)
@@ -179,6 +181,8 @@ def main(argv: list[str] | None = None) -> int:
                     enable_kerberos=args.enable_kerberos,
                     ad_username=args.ad_username,
                     rotate_kerberos_keytab=args.rotate_kerberos_keytab,
+                    requested_uid=args.uid,
+                    requested_gid=args.gid,
                     created_by=args.created_by,
                     email=args.email,
                     phone=args.phone,

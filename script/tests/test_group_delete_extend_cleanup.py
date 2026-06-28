@@ -1,5 +1,5 @@
 from uid_manager.config import AppConfig
-from uid_manager.models import ContainerRecord, DeleteContainerRequest, ExtendContainerRequest, GroupRecord, GroupRequest, UserRecord
+from uid_manager.models import ContainerRecord, DeleteContainerRequest, ExtendContainerRequest, GroupRecord, GroupRequest, KerberosIdentityRecord, UserRecord
 from uid_manager.services.delete_container import ContainerDeleteService
 from uid_manager.services.expired_cleanup import ExpiredCleanupService
 from uid_manager.services.extend_container import ContainerExtendService
@@ -22,7 +22,7 @@ def repo_with_container() -> FakeRepository:
     repo = FakeRepository()
     repo.users["alice"] = UserRecord(1, "Alice", "alice", 10123, 10123, "alice@example.com")
     repo.groups["alice"] = GroupRecord(1, "alice", 10123)
-    repo.containers.append(ContainerRecord(1, "abc123", "alice_by_jy", "FARM2", "decs", "v1", "alice", "Alice", "alice@example.com", "2026-12-31", "9100, 9101"))
+    repo.containers.append(ContainerRecord(1, "abc123", "alice_by_jy", "FARM2", "decs", "v1", "alice", "Alice", "alice@example.com", "2026-12-31", "9100, 9101", uid=10123, gid=10123))
     repo.used_port_values = {9100, 9101}
     repo.pending_ports = {9100: "ssh", 9101: "jupyter notebook"}
     return repo
@@ -51,6 +51,43 @@ def test_delete_apply_marks_deleted_and_removes_remote_container():
     assert post.deleted
     assert post.backups == ["FARM"]
     assert post.exports == 1
+
+
+def test_delete_last_user_container_removes_kerberos_refresh_secret_files():
+    repo = repo_with_container()
+    repo.kerberos_identities["alice"] = KerberosIdentityRecord(
+        username="alice",
+        ad_username="alice",
+        ad_realm="FARM.DECS.INTERNAL",
+        ad_netbios_domain="FARM",
+        ad_domain_sid="S-1-5-21-1-2-3",
+        ad_object_sid="S-1-5-21-1-2-3-1100",
+        ad_uid_number=10123,
+        ad_gid_number=10123,
+    )
+    remote = FakeAnsibleRunner()
+    service = ContainerDeleteService(config(), repo, remote, FakePostActions())
+    service.execute(DeleteContainerRequest(domain="FARM", server_number=2, filter_username="alice", skip_post_actions=True))
+
+    commands = "\n".join(command for _, command in remote.shell_calls)
+    assert "docker rm -f 'abc123'" in commands
+    assert "decs-krb-refresh@${instance}.timer" in commands
+    assert "DECS_KRB_CLEANUP_ENV=/etc/decs-krb/refresh.d/alice.env" in commands
+    assert "DECS_KRB_CLEANUP_KEYTAB=/etc/decs-krb/keytabs/alice.keytab" in commands
+    assert "DECS_KRB_CLEANUP_CCACHE=FILE:/run/user/10123/krb5cc" in commands
+
+
+def test_delete_keeps_kerberos_refresh_when_same_user_has_another_container_on_host():
+    repo = repo_with_container()
+    repo.containers.append(ContainerRecord(2, "def456", "alice_second", "FARM2", "decs", "v1", "alice", "Alice", "alice@example.com", "2026-12-31", "9102", uid=10123, gid=10123))
+    remote = FakeAnsibleRunner()
+    service = ContainerDeleteService(config(), repo, remote, FakePostActions())
+    service.execute(DeleteContainerRequest(domain="FARM", server_number=2, container_name="alice_by_jy", skip_post_actions=True))
+
+    commands = "\n".join(command for _, command in remote.shell_calls)
+    assert "docker rm -f 'abc123'" in commands
+    assert "DECS_KRB_CLEANUP_ENV" not in commands
+    assert [row.container_name for row in repo.containers] == ["alice_second"]
 
 
 def test_extend_dry_run_and_apply_all_matches():

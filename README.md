@@ -98,7 +98,7 @@ python3 -B -m uid_manager.cli create-container \
 - `--container-name` 생략 시 기본 이름 규칙 `username_by_createdby` 사용.
 - `--container-ports 6006,7860`: SSH/Jupyter 기본 포트 외 추가 컨테이너 포트 매핑.
 - `--enable-vnc`: 컨테이너 내부 `6080` 포트 추가 매핑, Docker 환경변수 `ENABLE_VNC=true` 전달. 외부 포트는 기존 포트 배정 방식으로 자동 선택. Legacy shell은 `--enable-vnc true` 또는 `--enable_vnc true`도 지원한다.
-- `--enable-kerberos`: Python CLI에서는 FARM Kerberized NFS opt-in으로 동작한다. Kerberos principal/keytab, Kerberized NFS mount source, host ccache directory, `KRB5CCNAME`, `/etc/krb5.conf` bind mount를 준비한다. keytab은 target host root-only secret으로만 보관하고 컨테이너에는 ccache만 공유한다. Legacy shell은 `--enable-kerberos true` 또는 `--enable_kerberos true`도 지원하며, FARM Samba AD/Synology NAS와 LAB storage MIT Kerberos PoC 흐름을 포함한다.
+- `--enable-kerberos`: Python CLI에서 FARM/LAB Kerberized NFS opt-in으로 동작한다. Kerberos principal/keytab, Kerberized NFS mount source, host ccache directory, `KRB5CCNAME`, `/etc/krb5.conf` bind mount를 준비한다. keytab은 target host root-only secret으로만 보관하고 컨테이너에는 ccache만 공유한다. FARM은 Samba AD/Synology NAS, LAB은 Samba AD/Linux storage 흐름을 사용한다.
 - `--rotate-kerberos-keytab`: 기존 AD user password를 재설정하고 새 keytab을 export한다. 기존 ticket은 만료 시각까지 유효할 수 있으므로 유출 대응 시 ticket lifetime도 함께 고려한다. Legacy shell은 `--rotate-kerberos-keytab true` 또는 `--rotate_kerberos_keytab true`도 지원한다.
 - `--no-db-record`: DB를 읽어 UID/GID와 포트 계획은 세우지만, 원격 Docker 컨테이너 생성 후 `user`, `group`, `used_ids`, `used_ports`, `docker_container` 쓰기와 DB backup/export를 건너뛴다. Python CLI는 생성 안내 메일만 보내고, legacy shell도 같은 목적으로 사용할 수 있다.
 - FARM Kerberos 모드에서 `--group groupA`를 지정하면 create script가 DB group뿐 아니라 AD group `groupA`의 `gidNumber/msSFU30*`와 user membership도 자동으로 보장한다. 이후 컨테이너 내부의 primary group도 `groupA`가 된다.
@@ -114,10 +114,10 @@ python3 -B -m uid_manager.cli create-container \
 5. DB의 `user`, `group`, `used_ids`, `user_group_membership` 조회 후 UID/GID 결정. 기존 username은 UID 재사용. 신규 username은 `used_ids` 최댓값 다음 번호 사용. group이 비어 있으면 username을 group으로 사용. 기존 user의 supplemental group은 컨테이너에 `DECS_SUPPLEMENTAL_GROUPS`로 전달한다.
 6. `--dry-run` 인 경우 원격 Docker 실행, LAB storage/FARM NAS 홈 생성, DB 쓰기, 백업, export, 메일 발송 없이 계획만 출력 후 종료.
 7. 대상 서버에서 Ansible shell로 `docker image inspect dguailab/<image>:<version>` 실행. 이미지가 없으면 `docker pull`.
-8. Kerberos 모드면 principal을 확인/생성하고 target host에 사용자별 keytab을 `root:root 0400`으로 export한다. FARM은 Samba AD에서 principal/keytab과 AD group을 관리하고, LAB은 storage 서버의 MIT Kerberos KDC에서 principal/keytab을 관리한다. FARM에서 `--group`이 username과 다르면 같은 이름의 AD group을 만들거나 갱신하고, `gidNumber/msSFU30*`와 user membership도 보장한다. `--rotate-kerberos-keytab true`면 password를 재설정한 뒤 keytab을 새로 export한다.
-9. LAB이면 storage 서버에 raw Ansible SSH로 접속해 홈 디렉토리를 미리 생성한다. LAB 일반 모드는 `LAB_STORAGE_USER_SHARE_ROOT/<username>`을 컨테이너 `UID:GID`, `750` 권한으로 만들고, LAB Kerberos 모드는 `LAB_KERBEROS_STORAGE_USER_SHARE_ROOT/<username>`을 같은 `UID:GID`, `750` 권한으로 만든다. FARM이면 NAS에 raw Ansible SSH로 접속해 홈 디렉토리를 미리 생성한다. FARM 일반 모드는 `FARM_NAS_USER_SHARE_ROOT/<username>`을 컨테이너 `UID:GID`, `750` 권한으로 만든다. FARM Kerberos 모드는 `FARM_KERBEROS_NAS_USER_SHARE_ROOT/<username>`을 NAS의 AD-mapped UID/GID, `750` 권한으로 만든다.
+8. Kerberos 모드면 Samba AD에서 principal/keytab과 AD group을 확인/생성하고 target host에 사용자별 keytab을 `root:root 0400`으로 export한다. `--group`이 username과 다르면 같은 이름의 AD group을 만들거나 갱신하고, `gidNumber/msSFU30*`와 user membership도 보장한다. `--rotate-kerberos-keytab true`면 password를 재설정한 뒤 keytab을 새로 export한다.
+9. LAB이면 storage 서버에 raw Ansible SSH로 접속해 홈 디렉토리를 미리 생성한다. LAB 일반 모드는 `LAB_STORAGE_USER_SHARE_ROOT/<username>`을 컨테이너 `UID:GID`, `750` 권한으로 만들고, LAB Kerberos 모드는 AD user/group이 storage와 target host에서 해석되는지 확인한 뒤 `LAB_KERBEROS_STORAGE_USER_SHARE_ROOT/<username>`을 `UID:GID`, `750` 권한으로 만든다. FARM이면 NAS에 raw Ansible SSH로 접속해 홈 디렉토리를 미리 생성한다. FARM 일반 모드는 `FARM_NAS_USER_SHARE_ROOT/<username>`을 컨테이너 `UID:GID`, `750` 권한으로 만든다. FARM Kerberos 모드는 `FARM_KERBEROS_NAS_USER_SHARE_ROOT/<username>`을 NAS의 AD-mapped UID/GID, `750` 권한으로 만든다.
 10. FARM Kerberos 모드면 NAS `svcgssd`/`idmapd`를 재시작하고 `/proc/net/rpc/*/flush`를 갱신해 Synology Kerberos NFS owner/group mapping cache를 비운다. 이 동작은 `FARM_KERBEROS_NAS_RESTART_GSS_SERVICES=false`로 비활성화할 수 있다.
-11. FARM Kerberos 모드에서 AD group을 쓰면 target host의 NFSv4 idmapper가 `FARM\<group>`을 해석할 수 있도록 host local group/user shadow entry를 준비한다. 컨테이너 runtime GID는 DB GID가 아니라 NAS AD-mapped group GID를 사용한다.
+11. FARM Kerberos 모드에서 AD group을 쓰면 target host의 NFSv4 idmapper가 `FARM\<group>`을 해석할 수 있도록 host local group/user shadow entry를 준비한다. 컨테이너 runtime UID/GID는 DB UID/GID와 AD `uidNumber/gidNumber`를 그대로 사용하며, Synology 내부 winbind UID/GID를 Docker runtime identity로 전달하지 않는다.
 12. Kerberos 모드면 target host에 `/usr/local/sbin/decs-krb-refresh`, `decs-krb-refresh@<username>.timer`, root-only refresh env를 설치하고 `/run/user/<uid>/krb5cc` ticket을 `kinit -kt`로 발급한다.
 13. Kerberos 모드면 target host에서 실제 NFS home write check를 수행한다. FARM은 첫 check가 실패하면 NAS GSS/RPC cache를 한 번 더 refresh하고 재시도한다. 그래도 실패하면 DB/container 생성 전에 중단한다. LAB은 storage-side Kerberos home/keytab 준비 후 LAB host mount에서 write check를 통과해야 진행한다.
 14. 대상 서버에서 Ansible shell로 `docker run -dit ...` 실행. 주요 옵션: GPU 전체 사용, 메모리 `192g`, `--runtime=nvidia`, `/home/takoN/share/user-share/` 또는 Kerberos mount root bind mount, `USER_ID`, `UID`, `GID`, `USER_PW`, `USER_GROUP` 환경변수 전달. `UID/GID`는 항상 DB/AD `uidNumber/gidNumber` 기준 값이며, Synology NAS 내부 winbind UID/GID를 Docker runtime identity로 전달하지 않는다. Kerberos 모드에서는 `DECS_USER_SUDO_MODE=restricted`도 전달해 package install용 sudo는 남기고 UID spoofing으로 이어지는 root 실행 경로를 막는다. 기존 user에게 supplemental group membership이 있으면 `DECS_SUPPLEMENTAL_GROUPS=groupA:gid,groupB:gid`도 전달한다.
@@ -210,9 +210,10 @@ bash legacy/script/delete_container_with_notification.sh --server-id LAB10 --nam
 8. `used_ports` 에서 해당 `docker_container.id` 에 연결된 포트 row 삭제.
 9. `docker_container` row는 삭제하지 않고 `existing = 0`, `deleted_at = NOW()` 로 soft delete.
 10. 대상 서버에서 Ansible shell로 `docker rm -f <container_id>` 실행. 실패 시 container name으로 한 번 더 삭제 시도.
-11. DB update와 원격 Docker 삭제 성공 시 transaction commit.
-12. `--skip-post-actions` 가 없으면 도메인 DB 백업, LAB/FARM Excel/Google Sheets export 갱신.
-13. wrapper가 삭제 성공 메시지 확인 후 사용자에게 삭제 안내 메일 발송.
+11. Kerberos identity가 DB에 있고, 같은 서버에 같은 username의 활성 컨테이너가 더 이상 없으면 target host에서 `decs-krb-refresh@<ad_username>.timer`를 disable하고 `/etc/decs-krb/refresh.d/<ad_username>.env`, `/etc/decs-krb/keytabs/<ad_username>.keytab`, `/run/user/<uid>/krb5cc`를 정리한다.
+12. DB update와 원격 Docker 삭제 성공 시 transaction commit.
+13. `--skip-post-actions` 가 없으면 도메인 DB 백업, LAB/FARM Excel/Google Sheets export 갱신.
+14. wrapper가 삭제 성공 메시지 확인 후 사용자에게 삭제 안내 메일 발송.
 
 삭제 실패 처리:
 
@@ -523,12 +524,13 @@ FARM_KERBEROS_AD_NETBIOS=FARM
 FARM_KERBEROS_REALM=FARM.DECS.INTERNAL
 FARM_KERBEROS_NIS_DOMAIN=farm
 FARM_KERBEROS_AD_DC_HOST=farm2
-FARM_KERBEROS_NAS_USER_SHARE_ROOT=/volume1/test_krb/user-share
+FARM_KERBEROS_AD_DC_HOSTS=farm2,farm6,farm7
+FARM_KERBEROS_NAS_USER_SHARE_ROOT=/volume1/share/user-share
 FARM_KERBEROS_NAS_RESTART_GSS_SERVICES=true
 FARM_KERBEROS_NAS_SVCGSSD=/usr/sbin/svcgssd
 FARM_KERBEROS_NAS_IDMAPD=/usr/sbin/idmapd
 FARM_KERBEROS_NAS_NFS_PRINCIPAL=nfs/nas.farm.decs.internal@FARM.DECS.INTERNAL
-FARM_KERBEROS_MOUNT_USER_SHARE_ROOT=/mnt/nas-krb-test-v4/user-share
+FARM_KERBEROS_MOUNT_USER_SHARE_ROOT=/home/tako{server_number}/share/user-share
 FARM_KERBEROS_CCACHE_BASE=/run/user
 FARM_KERBEROS_KRB5_CONF=/etc/krb5.conf
 FARM_KERBEROS_KEYTAB_DIR=/etc/decs-krb/keytabs
@@ -565,12 +567,14 @@ SERVER_DOMAIN=LAB
 | `LAB_STORAGE_SUDO` | LAB storage에서 `mkdir/chown/chmod` 앞에 붙일 명령. 기본값: `sudo -n`. |
 | `LAB_HOST_USER_SHARE_ROOT_TEMPLATE` | LAB Docker host에서 컨테이너 `/home`으로 bind mount할 NFS mount root template. `{server_number}`가 LAB 번호로 치환된다. 기본값: `/home/tako{server_number}/share/user-share`. |
 | `LAB_KERBEROS_REALM` | LAB Kerberos realm. 기본값: `LAB.DECS.INTERNAL`. |
+| `LAB_KERBEROS_AD_NETBIOS` | LAB Samba AD NetBIOS domain. 기본값: `LAB`. |
+| `LAB_KERBEROS_NIS_DOMAIN` | LAB Samba RFC2307/msSFU30 NIS domain. 기본값: `lab`. |
+| `LAB_KERBEROS_AD_DC_HOST` | LAB Samba AD DC Ansible host alias. 기본값: `lab2`. |
 | `LAB_KERBEROS_STORAGE_USER_SHARE_ROOT` | LAB Kerberos PoC에서 storage 서버에 생성할 실제 home root. 기본값: `/294t/share/test-krb/user-share`. |
 | `LAB_KERBEROS_MOUNT_USER_SHARE_ROOT` | LAB Kerberos PoC에서 대상 LAB host가 bind mount할 NFSv4.1 `sec=krb5p` mount root. 기본값: `/mnt/decs-lab-test-krb/user-share`. |
 | `LAB_KERBEROS_CCACHE_BASE` | host `rpc.gssd`가 볼 user ccache base. 기본값 `/run/user`; 실제 ccache는 `/run/user/<uid>/krb5cc`. |
 | `LAB_KERBEROS_KRB5_CONF` | 컨테이너에 read-only bind mount할 LAB host Kerberos 설정 파일. 기본값 `/etc/krb5.conf`. |
 | `LAB_KERBEROS_KEYTAB_DIR` | target LAB host에 보관할 사용자별 keytab root. 기본값: `/etc/decs-krb/keytabs`; 파일 권한은 `root:root 0400`. |
-| `LAB_KERBEROS_STORAGE_KEYTAB_DIR` | LAB storage 서버에서 생성/보관할 사용자별 keytab root. 기본값: `/root/decs-lab-test-krb/keytabs`. |
 | `LAB_KERBEROS_REFRESH_ENV_DIR` | `decs-krb-refresh@.service`가 읽을 root-only env 파일 root. 기본값: `/etc/decs-krb/refresh.d`. |
 | `FARM_NAS_HOST`, `FARM_NAS_PORT`, `FARM_NAS_USER` | FARM 컨테이너 생성 전 사용자 홈 디렉토리를 미리 만들 NAS SSH 접속 정보. |
 | `FARM_NAS_SSH_KEY` | FARM NAS 접속에 사용할 SSH private key. 생략 시 SSH 기본 키 사용. |
@@ -579,13 +583,14 @@ SERVER_DOMAIN=LAB
 | `FARM_KERBEROS_AD_NETBIOS` | NAS winbind 조회와 target host NFSv4 idmapper용 `FARM\<group>` shadow group 이름에 사용할 AD NetBIOS domain. 기본값: `FARM`. |
 | `FARM_KERBEROS_REALM` | Kerberos realm. 기본값: `FARM.DECS.INTERNAL`. |
 | `FARM_KERBEROS_NIS_DOMAIN` | Samba RFC2307/msSFU30 NIS domain. 기본값: `farm`. Synology Kerberos NFS 신규 user mapping에 필요하다. |
-| `FARM_KERBEROS_AD_DC_HOST` | AD principal/keytab을 관리할 Ansible host alias. 현재 PoC keytab mode는 target host와 이 값이 같아야 한다. 기본값: `farm2`. |
-| `FARM_KERBEROS_NAS_USER_SHARE_ROOT` | Kerberos 모드에서 NAS에 생성할 실제 home root. PoC 기본값: `/volume1/test_krb/user-share`. |
+| `FARM_KERBEROS_AD_DC_HOSTS` | FARM Samba AD DC Ansible host alias CSV. 운영 기준: `farm2,farm6,farm7`. target host가 DC가 아니면 primary DC에서 keytab을 만든 뒤 target host로 root-only 복사한다. |
+| `FARM_KERBEROS_AD_DC_HOST` | `FARM_KERBEROS_AD_DC_HOSTS` 가 없을 때 사용할 primary AD DC fallback. 기본값: `farm2`. |
+| `FARM_KERBEROS_NAS_USER_SHARE_ROOT` | Kerberos 모드에서 NAS에 생성할 실제 home root. 운영 기본값: `/volume1/share/user-share`. |
 | `FARM_KERBEROS_NAS_RESTART_GSS_SERVICES` | 신규 AD user 생성 후 Synology NAS `svcgssd`/`idmapd`를 재시작하고 RPC identity cache를 flush해 Kerberos NFS owner/group mapping cache를 갱신할지 여부. 기본값 `true`. Kerberos NFS 세션에 짧은 영향이 있을 수 있어 운영 전 검토 필요. |
 | `FARM_KERBEROS_NAS_SVCGSSD` | NAS `svcgssd` 경로. 기본값 `/usr/sbin/svcgssd`. |
 | `FARM_KERBEROS_NAS_IDMAPD` | NAS `idmapd` 경로. 기본값 `/usr/sbin/idmapd`. |
-| `FARM_KERBEROS_NAS_NFS_PRINCIPAL` | NAS `svcgssd` 시작 시 사용할 NFS service principal. PoC 기본값 `nfs/nas.farm.decs.internal@FARM.DECS.INTERNAL`. |
-| `FARM_KERBEROS_MOUNT_USER_SHARE_ROOT` | Kerberos 모드에서 대상 FARM host가 bind mount할 NFSv4.1 `sec=krb5p` mount root. PoC 기본값: `/mnt/nas-krb-test-v4/user-share`. |
+| `FARM_KERBEROS_NAS_NFS_PRINCIPAL` | NAS `svcgssd` 시작 시 사용할 NFS service principal. 기본값 `nfs/nas.farm.decs.internal@FARM.DECS.INTERNAL`. |
+| `FARM_KERBEROS_MOUNT_USER_SHARE_ROOT` | Kerberos 모드에서 대상 FARM host가 bind mount할 NFSv4 `sec=krb5p` mount root. `{server_number}` placeholder를 지원한다. 운영 기본값: `/home/tako{server_number}/share/user-share`. |
 | `FARM_KERBEROS_CCACHE_BASE` | host `rpc.gssd`가 볼 user ccache base. 기본값 `/run/user`; 실제 ccache는 `/run/user/<uid>/krb5cc`. |
 | `FARM_KERBEROS_KRB5_CONF` | 컨테이너에 read-only bind mount할 host Kerberos 설정 파일. 기본값 `/etc/krb5.conf`. |
 | `FARM_KERBEROS_KEYTAB_DIR` | target host에 보관할 사용자별 keytab root. 기본값: `/etc/decs-krb/keytabs`; 파일 권한은 `root:root 0400`. |
@@ -659,15 +664,19 @@ User_Alias DECS_NAS_PROVISIONERS = jy, dongmin0204, hyrn268, uugaemi, suhyeon, g
 DECS_NAS_PROVISIONERS ALL=(root) NOPASSWD: /usr/bin/mkdir -p /volume1/share/user-share/*, /usr/bin/chown [0-9]*\:[0-9]* /volume1/share/user-share/*, /usr/bin/chmod 750 /volume1/share/user-share/*
 ```
 
-- Kerberized NFS는 아직 운영 mount가 아니라 PoC로 분리한다. 현재 확인된 범위는 farm2 Samba AD DC + Synology NAS `test_krb` 공유 + farm2 병렬 mount다.
+- FARM Kerberized NFS는 운영 `/volume1/share` mount에 적용되어 있다.
   - AD realm: `FARM.DECS.INTERNAL`
-  - AD DC: `dc1.farm.decs.internal` / `100.100.100.102`
-  - NAS test share: `nas.farm.decs.internal:/volume1/test_krb`
-  - 성공한 mount: `/mnt/nas-krb-test-v4`, `vers=4.1,sec=krb5p`
-  - host root-only keytab으로 만든 `/run/user/<uid>/krb5cc`를 host `rpc.gssd`가 사용해 NFSv4.1 read/write 하는 것까지 확인했다.
+  - AD DCs: `farm2` / `100.100.100.102`, `farm6` / `100.100.100.106`, `farm7` / `100.100.100.107`
+  - NAS source: `nas.farm.decs.internal:/volume1/share`
+  - NAS storage IP: `100.100.100.120`
+  - FARM mount: `/home/takoN/share`, `vers=4.0,sec=krb5p,addr=100.100.100.120`
+  - container home bind root: `/home/takoN/share/user-share`
+  - NAS home root: `/volume1/share/user-share`
+  - host root-only keytab으로 만든 `/run/user/<uid>/krb5cc`를 host `rpc.gssd`가 사용해 NFS read/write 하는 것까지 확인했다.
+  - NFSv4.1은 rollout 중 timeout/access denied가 확인되어 현재 운영 기본값은 v4.0이다.
   - keytab은 DB에 저장하지 않는다. DB에는 필요 시 `kerberos_enabled`, `principal`, `rotated_at` 같은 메타데이터만 추가하고 secret은 target host root-only filesystem에 둔다.
-  - 재현 절차와 rollback은 `docs/kerberized-nfs-poc/README.md` 참고.
-  - Python CLI의 `--enable-kerberos`는 현재 FARM Kerberos opt-in이다. Legacy shell의 `--enable-kerberos true`는 LAB/FARM opt-in이며, FARM keytab PoC는 target host가 `FARM_KERBEROS_AD_DC_HOSTS` 중 하나여야 한다. LAB keytab PoC는 LAB storage 서버의 MIT Kerberos KDC와 target LAB host ccache refresh service를 사용한다.
+  - 전체 FARM 서버 설정 runbook은 `/home/jy/krb/final_farm_nas_ad_kerberos_setup_20260627.md` 참고.
+  - Python CLI의 `--enable-kerberos`는 FARM/LAB Kerberos opt-in이다. FARM은 target host가 `FARM_KERBEROS_AD_DC_HOSTS` 중 하나이면 해당 DC에서 직접 keytab을 만들고, 아니면 primary DC에서 만든 keytab을 target host로 복사한다. LAB은 `LAB_KERBEROS_AD_DC_HOST`의 Samba AD DC에서 user/keytab을 만들고 target LAB host ccache refresh service를 사용한다.
   - 신규 AD user는 principal/keytab/RFC2307 attrs와 `msSFU30Name/msSFU30NisDomain`을 자동 생성한다. `msSFU30*`가 없으면 Synology NFS server가 신규 Kerberos identity에 write 권한을 주지 않는 케이스가 확인됐다. create script는 실제 NFS write check를 통과할 때만 컨테이너/DB 생성을 진행한다.
   - Kerberos 모드에서 `--group groupA`처럼 username과 다른 group을 지정하면 create script가 AD group `groupA`의 `gidNumber/msSFU30*`를 보장하고 사용자를 member로 추가한다. 컨테이너 내부 UID/GID는 DB `user.ubuntu_uid/user.ubuntu_gid`를 그대로 사용한다. 사용자는 컨테이너 안에서 `group-dir-share ~/sharing_dir groupA`로 자기 홈 안의 원하는 디렉토리를 직접 공유할 수 있다.
   - Kerberos 모드의 canonical UID 정책은 `DB user.ubuntu_uid == AD uidNumber == FARM NFS returned UID == container UID`다. create script는 Synology 내부 winbind UID/GID를 NAS ownership 준비에만 사용하고 DB/Docker runtime identity로 저장하거나 전달하지 않는다.

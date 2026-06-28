@@ -35,10 +35,11 @@ def test_port_allocation_covers_ssh_jupyter_vnc_and_extra_ports():
     ]
 
 
-def test_kerberos_paths_match_current_poc_defaults():
-    paths = KerberosPaths("alice", 10123, config())
+def test_kerberos_paths_match_current_farm_defaults():
+    cfg = config()
+    paths = KerberosPaths("alice", 10123, cfg, cfg.farm_kerberos_mount_user_share_root_for_server(2))
     assert paths.principal == "alice@FARM.DECS.INTERNAL"
-    assert paths.nas_home == "/volume1/test_krb/user-share/alice"
-    assert paths.host_home == "/mnt/nas-krb-test-v4/user-share/alice"
+    assert paths.nas_home == "/volume1/share/user-share/alice"
+    assert paths.host_home == "/home/tako2/share/user-share/alice"
     assert paths.ccache_file == "/run/user/10123/krb5cc"
     assert paths.keytab_file == "/etc/decs-krb/keytabs/alice.keytab"

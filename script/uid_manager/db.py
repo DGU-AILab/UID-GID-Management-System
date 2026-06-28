@@ -14,9 +14,12 @@ class Repository(Protocol):
     def rollback(self) -> None: ...
     def used_ports(self) -> List[int]: ...
     def find_user(self, username: str) -> Optional[UserRecord]: ...
+    def find_user_by_uid(self, uid: int) -> Optional[UserRecord]: ...
     def find_kerberos_identity(self, username: str) -> Optional[KerberosIdentityRecord]: ...
     def find_group(self, groupname: str) -> Optional[GroupRecord]: ...
+    def find_group_by_gid(self, gid: int) -> Optional[GroupRecord]: ...
     def next_available_id(self, minimum: int = 10000) -> int: ...
+    def is_id_reserved(self, value: int) -> bool: ...
     def reserve_id(self, value: int) -> None: ...
     def insert_group(self, groupname: str, gid: int) -> None: ...
     def upsert_user(self, name: str, username: str, uid: int, gid: int, email: str, phone: str, note: str) -> None: ...
@@ -203,6 +206,14 @@ class MySqlRepository:
             return None
         return UserRecord(row["id"], row["name"], row["ubuntu_username"], row["ubuntu_uid"], row["ubuntu_gid"], row.get("email") or "", row.get("phone") or "", row.get("note") or "")
 
+    def find_user_by_uid(self, uid: int) -> Optional[UserRecord]:
+        with self.cursor() as cursor:
+            cursor.execute("SELECT * FROM user WHERE ubuntu_uid=%s", [uid])
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return UserRecord(row["id"], row["name"], row["ubuntu_username"], row["ubuntu_uid"], row["ubuntu_gid"], row.get("email") or "", row.get("phone") or "", row.get("note") or "")
+
     def find_kerberos_identity(self, username: str) -> Optional[KerberosIdentityRecord]:
         with self.cursor() as cursor:
             cursor.execute(
@@ -242,11 +253,24 @@ class MySqlRepository:
             return None
         return GroupRecord(row["id"], row["ubuntu_groupname"], row["ubuntu_gid"])
 
+    def find_group_by_gid(self, gid: int) -> Optional[GroupRecord]:
+        with self.cursor() as cursor:
+            cursor.execute("SELECT * FROM `group` WHERE ubuntu_gid=%s", [gid])
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return GroupRecord(row["id"], row["ubuntu_groupname"], row["ubuntu_gid"])
+
     def next_available_id(self, minimum: int = 10000) -> int:
         with self.cursor() as cursor:
             cursor.execute("SELECT COALESCE(MAX(id), %s) AS max_id FROM used_ids", [minimum - 1])
             max_id = int(cursor.fetchone()["max_id"])
         return minimum if max_id < minimum else max_id + 1
+
+    def is_id_reserved(self, value: int) -> bool:
+        with self.cursor() as cursor:
+            cursor.execute("SELECT 1 FROM used_ids WHERE id=%s LIMIT 1", [value])
+            return cursor.fetchone() is not None
 
     def reserve_id(self, value: int) -> None:
         with self.cursor() as cursor:

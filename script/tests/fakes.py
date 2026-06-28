@@ -4,7 +4,7 @@ import re
 from typing import Iterable, List, Optional
 
 from uid_manager.models import ContainerRecord, GroupRecord, KerberosIdentityRecord, UserRecord
-from uid_manager.runners import CommandResult
+from uid_manager.runners import CommandResult, RecordingRunner
 
 
 class FakeRepository:
@@ -41,16 +41,31 @@ class FakeRepository:
     def find_user(self, username: str) -> Optional[UserRecord]:
         return self.users.get(username)
 
+    def find_user_by_uid(self, uid: int) -> Optional[UserRecord]:
+        for user in self.users.values():
+            if user.uid == uid:
+                return user
+        return None
+
     def find_kerberos_identity(self, username: str) -> Optional[KerberosIdentityRecord]:
         return self.kerberos_identities.get(username)
 
     def find_group(self, groupname: str) -> Optional[GroupRecord]:
         return self.groups.get(groupname)
 
+    def find_group_by_gid(self, gid: int) -> Optional[GroupRecord]:
+        for group in self.groups.values():
+            if group.gid == gid:
+                return group
+        return None
+
     def next_available_id(self, minimum: int = 10000) -> int:
         values = self.used_id_values | {u.uid for u in self.users.values()} | {g.gid for g in self.groups.values()}
         current = max(values | {minimum - 1})
         return minimum if current < minimum else current + 1
+
+    def is_id_reserved(self, value: int) -> bool:
+        return value in self.used_id_values
 
     def reserve_id(self, value: int) -> None:
         self.used_id_values.add(value)
@@ -180,6 +195,7 @@ class FakeAnsibleRunner:
     def __init__(self) -> None:
         self.shell_calls: list[tuple[str, str]] = []
         self.raw_calls: list[tuple[str, str]] = []
+        self.local_runner = RecordingRunner()
         self.shell_outputs: list[str] = []
         self.raw_outputs: list[str] = []
         self.last_ad_username = "alice"
@@ -198,19 +214,37 @@ class FakeAnsibleRunner:
                 self.last_ad_uid = int(uid.group(1))
             if gid:
                 self.last_ad_gid = int(gid.group(1))
+        if "kerberos_lab_storage_ad_home_ready" in command:
+            uid = re.search(r"^uid=(\d+)", command, re.MULTILINE)
+            gid = re.search(r"^gid=(\d+)", command, re.MULTILINE)
+            if uid:
+                self.last_ad_uid = int(uid.group(1))
+            if gid:
+                self.last_ad_gid = int(gid.group(1))
+        if "kerberos_lab_host_identity_ready" in command:
+            uid = re.search(r"^uid=(\d+)", command, re.MULTILINE)
+            gid = re.search(r"^gid=(\d+)", command, re.MULTILINE)
+            if uid:
+                self.last_ad_uid = int(uid.group(1))
+            if gid:
+                self.last_ad_gid = int(gid.group(1))
         if "decs_ad_existing_identity_lookup" in command:
             stdout = self.shell_outputs.pop(0) if self.shell_outputs else ""
             return CommandResult(["ansible", host], stdout=stdout)
         if "ad_object_sid" in command and "ad_uid_number" in command:
+            is_lab = "realm=LAB.DECS.INTERNAL" in command or "netbios=LAB" in command
+            realm = "LAB.DECS.INTERNAL" if is_lab else "FARM.DECS.INTERNAL"
+            netbios = "LAB" if is_lab else "FARM"
+            domain_sid = "S-1-5-21-110-220-330" if is_lab else "S-1-5-21-100-200-300"
             sid_rid = self.last_ad_uid % 100000
             return CommandResult(
                 ["ansible", host],
                 stdout=(
                     f"ad_username={self.last_ad_username}\n"
-                    "ad_realm=FARM.DECS.INTERNAL\n"
-                    "ad_netbios_domain=FARM\n"
-                    f"ad_domain_sid=S-1-5-21-100-200-300\n"
-                    f"ad_object_sid=S-1-5-21-100-200-300-{sid_rid}\n"
+                    f"ad_realm={realm}\n"
+                    f"ad_netbios_domain={netbios}\n"
+                    f"ad_domain_sid={domain_sid}\n"
+                    f"ad_object_sid={domain_sid}-{sid_rid}\n"
                     f"ad_uid_number={self.last_ad_uid}\n"
                     f"ad_gid_number={self.last_ad_gid}\n"
                 ),
@@ -224,6 +258,23 @@ class FakeAnsibleRunner:
 
     def raw(self, host: str, command: str, *, user: str, port: int, private_key: str = "", ssh_common_args: str = "", check: bool = True) -> CommandResult:
         self.raw_calls.append((host, command))
+        if "decs_storage_home_identity_stat" in command:
+            stdout = self.raw_outputs.pop(0) if self.raw_outputs else "missing\n"
+            return CommandResult(["ansible", host], stdout=stdout)
+        if "kerberos_lab_storage_identity_ready" in command:
+            uid = re.search(r"^uid=(\d+)", command, re.MULTILINE)
+            gid = re.search(r"^gid=(\d+)", command, re.MULTILINE)
+            if uid:
+                self.last_ad_uid = int(uid.group(1))
+            if gid:
+                self.last_ad_gid = int(gid.group(1))
+        if "kerberos_lab_storage_ad_home_ready" in command:
+            uid = re.search(r"^uid=(\d+)", command, re.MULTILINE)
+            gid = re.search(r"^gid=(\d+)", command, re.MULTILINE)
+            if uid:
+                self.last_ad_uid = int(uid.group(1))
+            if gid:
+                self.last_ad_gid = int(gid.group(1))
         stdout = self.raw_outputs.pop(0) if self.raw_outputs else ""
         return CommandResult(["ansible", host], stdout=stdout)
 

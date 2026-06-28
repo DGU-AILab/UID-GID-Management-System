@@ -13,6 +13,11 @@ def config() -> AppConfig:
         "DB_USER": "u",
         "DB_PASSWORD": "p",
         "ANSIBLE_INVENTORY": "/tmp/inventory.ini",
+        "LAB_KERBEROS_AD_DC_HOST": "lab2",
+        "LAB_KERBEROS_AD_NETBIOS": "LAB",
+        "LAB_KERBEROS_NIS_DOMAIN": "lab",
+        "LAB_KERBEROS_STORAGE_USER_SHARE_ROOT": "/294t/share/test-krb/user-share",
+        "LAB_KERBEROS_MOUNT_USER_SHARE_ROOT": "/mnt/decs-lab-test-krb/user-share",
     })
 
 
@@ -53,6 +58,60 @@ def test_dry_run_new_plain_farm_user_reuses_uid_as_group_gid():
     assert "DECS_USER_SUDO_MODE='restricted'" not in result.plan.commands[0]
 
 
+def test_dry_run_new_user_can_use_requested_uid_gid():
+    repo = FakeRepository()
+    service = ContainerCreateService(config(), repo, FakeAnsibleRunner(), FakePostActions())
+    result = service.execute(request(requested_uid=10018, requested_gid=10019))
+
+    rendered = result.plan.render()
+    assert result.uid == 10018
+    assert result.gid == 10019
+    assert "identity_source: requested" in rendered
+    assert "requested_uid: 10018" in rendered
+    assert "requested_gid: 10019" in rendered
+    assert "UID='10018'" in result.plan.commands[0]
+    assert "GID='10019'" in result.plan.commands[0]
+
+
+def test_requested_uid_conflicting_with_db_user_is_rejected():
+    repo = FakeRepository()
+    repo.users["bob"] = UserRecord(2, "Bob", "bob", 10018, 10018)
+    service = ContainerCreateService(config(), repo, FakeAnsibleRunner(), FakePostActions())
+
+    try:
+        service.execute(request(requested_uid=10018))
+    except ValidationError as exc:
+        assert "--uid 10018 already belongs to user bob" in str(exc)
+    else:
+        raise AssertionError("expected requested uid conflict")
+
+
+def test_requested_gid_conflicting_with_db_group_is_rejected():
+    repo = FakeRepository()
+    repo.groups["projectb"] = GroupRecord(2, "projectb", 10019)
+    service = ContainerCreateService(config(), repo, FakeAnsibleRunner(), FakePostActions())
+
+    try:
+        service.execute(request(requested_gid=10019))
+    except ValidationError as exc:
+        assert "--gid 10019 already belongs to group projectb" in str(exc)
+    else:
+        raise AssertionError("expected requested gid conflict")
+
+
+def test_requested_uid_must_match_existing_user():
+    repo = FakeRepository()
+    repo.users["alice"] = UserRecord(1, "Alice", "alice", 10020, 10020)
+    service = ContainerCreateService(config(), repo, FakeAnsibleRunner(), FakePostActions())
+
+    try:
+        service.execute(request(requested_uid=10018))
+    except ValidationError as exc:
+        assert "existing user alice has uid 10020, requested 10018" in str(exc)
+    else:
+        raise AssertionError("expected existing user requested uid mismatch")
+
+
 def test_dry_run_lab_user_uses_lab_mount_template():
     repo = FakeRepository()
     service = ContainerCreateService(config(), repo, FakeAnsibleRunner(), FakePostActions())
@@ -61,6 +120,82 @@ def test_dry_run_lab_user_uses_lab_mount_template():
     assert result.server_id == "LAB2"
     assert "--mount type=bind,source='/home/tako2/share/user-share/',target=/home" in result.plan.commands[0]
     assert any("LAB storage home" in step for step in result.plan.steps)
+
+
+def test_lab_new_user_adopts_existing_storage_home_owner():
+    repo = FakeRepository()
+    remote = FakeAnsibleRunner()
+    remote.raw_outputs = ["present 10051 10051\n"]
+    service = ContainerCreateService(config(), repo, remote, FakePostActions())
+    result = service.execute(request(domain="LAB", server_number=8))
+
+    assert result.uid == 10051
+    assert result.gid == 10051
+    assert "identity_source: storage_home" in result.plan.render()
+    assert "adopted_storage_home: /294t/dcloud/share/user-share/alice" in result.plan.render()
+
+
+def test_apply_lab_adopted_storage_home_owner_writes_db_with_that_uid():
+    repo = FakeRepository()
+    remote = FakeAnsibleRunner()
+    remote.raw_outputs = ["present 10051 10051\n"]
+    service = ContainerCreateService(config(), repo, remote, FakePostActions())
+    result = service.execute(request(domain="LAB", server_number=8, dry_run=False))
+
+    assert result.uid == 10051
+    assert repo.users["alice"].uid == 10051
+    assert repo.groups["alice"].gid == 10051
+    assert 10051 in repo.used_id_values
+
+
+def test_lab_storage_home_owner_conflict_is_rejected():
+    repo = FakeRepository()
+    repo.users["bob"] = UserRecord(2, "Bob", "bob", 10051, 10051)
+    remote = FakeAnsibleRunner()
+    remote.raw_outputs = ["present 10051 10051\n"]
+    service = ContainerCreateService(config(), repo, remote, FakePostActions())
+
+    try:
+        service.execute(request(domain="LAB", server_number=8))
+    except ValidationError as exc:
+        assert "uid 10051 already belongs to bob" in str(exc)
+    else:
+        raise AssertionError("expected storage uid conflict")
+
+
+def test_requested_uid_gid_must_match_adopted_storage_home():
+    repo = FakeRepository()
+    remote = FakeAnsibleRunner()
+    remote.raw_outputs = ["present 10051 10051\n"]
+    service = ContainerCreateService(config(), repo, remote, FakePostActions())
+
+    try:
+        service.execute(request(domain="LAB", server_number=8, requested_uid=10018, requested_gid=10018))
+    except ValidationError as exc:
+        assert "selected=10018:10018 storage=10051:10051" in str(exc)
+    else:
+        raise AssertionError("expected requested id and storage home mismatch")
+
+
+def test_dry_run_lab_kerberos_uses_lab_realm_and_ccache():
+    repo = FakeRepository()
+    service = ContainerCreateService(config(), repo, FakeAnsibleRunner(), FakePostActions())
+    result = service.execute(request(domain="LAB", server_number=8, enable_kerberos=True))
+
+    command = result.plan.commands[0]
+    rendered = result.plan.render()
+    assert result.server_id == "LAB8"
+    assert "ad_username: alice" in rendered
+    assert "ad_private_group: alice_gid" in rendered
+    assert "ad_primary_group: alice_gid" in rendered
+    assert "kerberos_principal: alice@LAB.DECS.INTERNAL" in rendered
+    assert "kerberos_realm: LAB.DECS.INTERNAL" in rendered
+    assert "kerberos_storage_home: /294t/share/test-krb/user-share/alice" in rendered
+    assert "KRB5CCNAME='FILE:/run/user/10000/krb5cc'" in command
+    assert "DECS_KRB5_PRINCIPAL='alice@LAB.DECS.INTERNAL'" in command
+    assert "KRB5_REALM='LAB.DECS.INTERNAL'" in command
+    assert "DECS_USER_SUDO_MODE='restricted'" in command
+    assert "--mount type=bind,source='/mnt/decs-lab-test-krb/user-share/',target=/home" in command
 
 
 def test_dry_run_kerberos_container_sets_ccache_and_restricted_sudo():
@@ -156,6 +291,40 @@ def test_apply_lab_prepares_storage_home_and_writes_db():
     assert post.created and post.backups == ["LAB"] and post.exports == 1
 
 
+def test_apply_lab_kerberos_prepares_samba_ad_keytab_storage_home_and_access_check():
+    repo = FakeRepository()
+    remote = FakeAnsibleRunner()
+    post = FakePostActions()
+    service = ContainerCreateService(config(), repo, remote, post)
+    result = service.execute(request(domain="LAB", server_number=8, enable_kerberos=True, dry_run=False, skip_post_actions=False))
+
+    raw_commands = "\n".join(command for _, command in remote.raw_calls)
+    shell_commands = "\n".join(command for _, command in remote.shell_calls)
+    local_commands = "\n".join(" ".join(command) for command in remote.local_runner.commands)
+    assert result.runtime_gid == 10000
+    assert "kadmin.local" not in raw_commands
+    assert "/294t/share/test-krb/user-share/alice" in raw_commands
+    assert "kerberos_lab_storage_ad_home_ready" in raw_commands
+    assert "getent passwd \"$username\"" in raw_commands
+    assert "samba-tool user create \"$username\"" in shell_commands
+    assert "principal=alice@LAB.DECS.INTERNAL" in shell_commands
+    assert "keytab_file=/etc/decs-krb/keytabs/alice.keytab" in shell_commands
+    assert "kerberos_lab_host_ad_identity_ready" in shell_commands
+    assert "decs-krb-refresh" in shell_commands
+    assert "setpriv --reuid=10000 --regid=10000" in shell_commands
+    assert "src=/etc/decs-krb/keytabs/alice.keytab" in local_commands
+    docker_runs = [command for _, command in remote.shell_calls if command.startswith("docker run")]
+    assert docker_runs and "DECS_KRB5_PRINCIPAL='alice@LAB.DECS.INTERNAL'" in docker_runs[0]
+    assert docker_runs and "KRB5_REALM='LAB.DECS.INTERNAL'" in docker_runs[0]
+    identity = repo.kerberos_identities["alice"]
+    assert identity.ad_realm == "LAB.DECS.INTERNAL"
+    assert identity.ad_netbios_domain == "LAB"
+    assert identity.ad_uid_number == 10000
+    assert identity.ad_gid_number == 10000
+    assert identity.last_seen_nfs_uid == 10000
+    assert post.created and post.backups == ["LAB"] and post.exports == 1
+
+
 def test_apply_kerberos_runs_ad_nas_refresh_ccache_and_access_check():
     repo = FakeRepository()
     remote = FakeAnsibleRunner()
@@ -175,6 +344,8 @@ def test_apply_kerberos_runs_ad_nas_refresh_ccache_and_access_check():
     assert "samba-tool user create" in shell_commands
     assert "message['gidNumber']" in shell_commands
     assert "message['uidNumber']" in shell_commands
+    assert "samba-tool user setprimarygroup \"$username\" \"$groupname\"" in shell_commands
+    assert "groupname=projecta" in shell_commands
     assert "decs-krb-refresh" in shell_commands
     assert "kerberos_nfs_owner_uid_mismatch" in shell_commands
     assert "setpriv --reuid=10000 --regid=10001" in shell_commands
@@ -202,6 +373,8 @@ def test_dry_run_kerberos_alias_separates_container_and_ad_identity():
     assert result.uid == 1003
     assert result.gid == 1003
     assert "ad_username: farm_jy" in rendered
+    assert "ad_private_group: farm_jy_gid" in rendered
+    assert "ad_primary_group: farm_jy_gid" in rendered
     assert "kerberos_principal: farm_jy@FARM.DECS.INTERNAL" in rendered
     assert "ad_unix_uid: 1003" in rendered
     assert "ad_unix_gid: 1003" in rendered
@@ -233,6 +406,8 @@ def test_apply_kerberos_alias_uses_db_uid_for_ad_host_and_container_identity():
     assert 'wbinfo_bin" -i "$identity"' in raw_commands
     assert 'id -u "$identity"' in raw_commands
     assert "samba-tool user create \"$username\"" in shell_commands
+    assert "groupname=farm_jy_gid" in shell_commands
+    assert "samba-tool user setprimarygroup \"$username\" \"$groupname\"" in shell_commands
     assert "principal=farm_jy@FARM.DECS.INTERNAL" in shell_commands
     assert "uid=1003" in shell_commands
     assert "gid=1003" in shell_commands

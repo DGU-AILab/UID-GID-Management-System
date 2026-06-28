@@ -121,6 +121,8 @@ class CreateContainerRequest:
     enable_kerberos: bool = False
     ad_username: Optional[str] = None
     rotate_kerberos_keytab: bool = False
+    requested_uid: Optional[int] = None
+    requested_gid: Optional[int] = None
     created_by: str = ""
     email: str = ""
     phone: str = ""
