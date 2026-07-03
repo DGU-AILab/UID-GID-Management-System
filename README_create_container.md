@@ -212,6 +212,14 @@ Flow:
 6. The service writes a Kerberos credential cache for the container user.
 7. The container receives only the ccache bind mount and `KRB5CCNAME`.
 
+The refresh timer runs every 1 hour by default. On each run,
+`decs-krb-refresh` checks the existing ccache. If the Kerberos `renew until`
+deadline is more than 24 hours away, it uses `kinit -R`; if the deadline is
+within 24 hours, missing, or renewal fails, it reissues a fresh ccache from the
+root-only keytab. The margin defaults to `86400` seconds and can be overridden
+per user with `DECS_KRB_REISSUE_BEFORE_SECONDS` in
+`/etc/decs-krb/refresh.d/<username>.env`.
+
 Important paths:
 
 ```text

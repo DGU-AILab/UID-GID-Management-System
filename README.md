@@ -118,7 +118,7 @@ python3 -B -m uid_manager.cli create-container \
 9. LAB이면 storage 서버에 raw Ansible SSH로 접속해 홈 디렉토리를 미리 생성한다. LAB 일반 모드는 `LAB_STORAGE_USER_SHARE_ROOT/<username>`을 컨테이너 `UID:GID`, `750` 권한으로 만들고, LAB Kerberos 모드는 AD user/group이 storage와 target host에서 해석되는지 확인한 뒤 `LAB_KERBEROS_STORAGE_USER_SHARE_ROOT/<username>`을 `UID:GID`, `750` 권한으로 만든다. FARM이면 NAS에 raw Ansible SSH로 접속해 홈 디렉토리를 미리 생성한다. FARM 일반 모드는 `FARM_NAS_USER_SHARE_ROOT/<username>`을 컨테이너 `UID:GID`, `750` 권한으로 만든다. FARM Kerberos 모드는 `FARM_KERBEROS_NAS_USER_SHARE_ROOT/<username>`을 NAS의 AD-mapped UID/GID, `750` 권한으로 만든다.
 10. FARM Kerberos 모드면 NAS `svcgssd`/`idmapd`를 재시작하고 `/proc/net/rpc/*/flush`를 갱신해 Synology Kerberos NFS owner/group mapping cache를 비운다. 이 동작은 `FARM_KERBEROS_NAS_RESTART_GSS_SERVICES=false`로 비활성화할 수 있다.
 11. FARM Kerberos 모드에서 AD group을 쓰면 target host의 NFSv4 idmapper가 `FARM\<group>`을 해석할 수 있도록 host local group/user shadow entry를 준비한다. 컨테이너 runtime UID/GID는 DB UID/GID와 AD `uidNumber/gidNumber`를 그대로 사용하며, Synology 내부 winbind UID/GID를 Docker runtime identity로 전달하지 않는다.
-12. Kerberos 모드면 target host에 `/usr/local/sbin/decs-krb-refresh`, `decs-krb-refresh@<username>.timer`, root-only refresh env를 설치하고 `/run/user/<uid>/krb5cc` ticket을 `kinit -kt`로 발급한다.
+12. Kerberos 모드면 target host에 `/usr/local/sbin/decs-krb-refresh`, `decs-krb-refresh@<username>.timer`, root-only refresh env를 설치하고 `/run/user/<uid>/krb5cc` ticket을 `kinit -kt`로 발급한다. Timer는 기본 1시간마다 실행된다. 기존 ccache의 Kerberos `renew until`이 24시간 초과로 남아 있으면 `kinit -R`을 수행하고, 24시간 이하로 남았거나 renewal이 실패하면 root-only keytab으로 새 ccache를 발급한다.
 13. Kerberos 모드면 target host에서 실제 NFS home write check를 수행한다. FARM은 첫 check가 실패하면 NAS GSS/RPC cache를 한 번 더 refresh하고 재시도한다. 그래도 실패하면 DB/container 생성 전에 중단한다. LAB은 storage-side Kerberos home/keytab 준비 후 LAB host mount에서 write check를 통과해야 진행한다.
 14. 대상 서버에서 Ansible shell로 `docker run -dit ...` 실행. 주요 옵션: GPU 전체 사용, 메모리 `192g`, `--runtime=nvidia`, `/home/takoN/share/user-share/` 또는 Kerberos mount root bind mount, `USER_ID`, `UID`, `GID`, `USER_PW`, `USER_GROUP` 환경변수 전달. `UID/GID`는 항상 DB/AD `uidNumber/gidNumber` 기준 값이며, Synology NAS 내부 winbind UID/GID를 Docker runtime identity로 전달하지 않는다. Kerberos 모드에서는 `DECS_USER_SUDO_MODE=restricted`도 전달해 package install용 sudo는 남기고 UID spoofing으로 이어지는 root 실행 경로를 막는다. 기존 user에게 supplemental group membership이 있으면 `DECS_SUPPLEMENTAL_GROUPS=groupA:gid,groupB:gid`도 전달한다.
 15. 생성된 container id 형식 확인. `docker inspect` 와 `docker port` 로 컨테이너와 SSH 포트 바인딩 검증.
@@ -596,6 +596,7 @@ SERVER_DOMAIN=LAB
 | `FARM_KERBEROS_KEYTAB_DIR` | target host에 보관할 사용자별 keytab root. 기본값: `/etc/decs-krb/keytabs`; 파일 권한은 `root:root 0400`. |
 | `FARM_KERBEROS_REFRESH_ENV_DIR` | `decs-krb-refresh@.service`가 읽을 root-only env 파일 root. 기본값: `/etc/decs-krb/refresh.d`. |
 | `FARM_KERBEROS_REFRESH_INTERVAL` | systemd timer refresh 주기. 기본값: `1h`. |
+| `DECS_KRB_REISSUE_BEFORE_SECONDS` | `/etc/decs-krb/refresh.d/<username>.env`에 per-user로 넣을 수 있는 ticket 재발급 여유 시간. 기본값 `86400`초. `renew until`이 이 값 이하로 남으면 `kinit -R` 대신 keytab으로 새 ticket을 발급한다. |
 | `FARM_KERBEROS_NAS_IDENTITY_RETRIES` | AD user 생성 직후 NAS winbind UID/GID 조회 재시도 횟수. 기본값: `12`. |
 | `FARM_KERBEROS_NAS_IDENTITY_RETRY_DELAY` | NAS winbind UID/GID 조회 재시도 간격 초. 기본값: `5`. |
 | `FARM_KERBEROS_NFS_ACCESS_INITIAL_DELAY` | AD/msSFU/NAS home 준비 후 첫 NFS write check 전 대기 초. 너무 빨리 접근하면 UID별 GSS 실패 context가 남을 수 있어 기본값은 `30`. |

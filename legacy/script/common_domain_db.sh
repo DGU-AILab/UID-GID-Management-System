@@ -1084,7 +1084,25 @@ fi
 
 install -d -o "\$DECS_KRB_UID" -g "\$DECS_KRB_GID" -m 0700 "\$DECS_KRB_CCACHE_DIR"
 
+reissue_before_seconds="\${DECS_KRB_REISSUE_BEFORE_SECONDS:-86400}"
+should_reissue=false
+
 if klist -s -c "\$DECS_KRB_CCACHE" 2>/dev/null; then
+  deadline_text="\$(klist -c "\$DECS_KRB_CCACHE" 2>/dev/null | awk '
+    /krbtgt\// && expires == "" { expires = \$3 " " \$4 }
+    /^[[:space:]]*renew until[[:space:]]/ { sub(/^[[:space:]]*renew until[[:space:]]*/, ""); print; found = 1; exit }
+    END { if (!found && expires != "") print expires }
+  ')"
+  if [ -n "\$deadline_text" ]; then
+    deadline_epoch="\$(date -d "\$deadline_text" +%s 2>/dev/null || true)"
+    now_epoch="\$(date +%s)"
+    if [ -n "\$deadline_epoch" ] && [ \$((deadline_epoch - now_epoch)) -le "\$reissue_before_seconds" ]; then
+      should_reissue=true
+    fi
+  fi
+fi
+
+if [ "\$should_reissue" = "false" ] && klist -s -c "\$DECS_KRB_CCACHE" 2>/dev/null; then
   if kinit -R -c "\$DECS_KRB_CCACHE" >/dev/null 2>&1; then
     chown "\$DECS_KRB_UID:\$DECS_KRB_GID" "\$ccache_path"
     chmod 0600 "\$ccache_path"
